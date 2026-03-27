@@ -1,0 +1,10 @@
+{
+  "sentry_org": "primathon-10",
+  "sentry_project": "wellversed-dev",
+  "github_repo": "prima-rajkumar/wellversed-dev-for-sentry-automation-testing",
+  "repo_path": "/Users/ramniwaspatidar/Projects/Work/wellversed-dev-for-sentry-automation-testing",
+  "base_branch": "sentry-testing-error-page",
+  "jira_project_key": "SFR",
+  "test_command": "",
+  "max_retries": 3
+}
