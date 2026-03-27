@@ -57,7 +57,7 @@ def build_services(project: ProjectConfig) -> tuple[SentryService, GitHubService
         base_url=settings.SENTRY_BASE_URL,
     )
     github = GitHubService(
-        repo_path=project.repo_path,
+        repo_path=project.repo_path or "",
         base_branch=project.base_branch,
         github_token=project.github_token or settings.GITHUB_TOKEN,
         github_repo=project.github_repo,
@@ -78,7 +78,7 @@ def build_services(project: ProjectConfig) -> tuple[SentryService, GitHubService
 @app.post("/pipeline/run", response_model=PipelineResponse)
 def run_pipeline(req: PipelineRequest):
     """Run the full pipeline: fetch → filter → fix → test → PR → Jira."""
-    lock = _get_repo_lock(req.project.repo_path)
+    lock = _get_repo_lock(req.project.github_repo)
     if not lock.acquire(blocking=False):
         raise HTTPException(status_code=409, detail="A pipeline run is already in progress for this repo")
 
@@ -177,7 +177,7 @@ async def sentry_webhook(request: Request):
     _last_webhook_trigger[sentry_project_slug] = now
 
     # Step 6: Check if pipeline is already running for this repo
-    lock = _get_repo_lock(project.repo_path)
+    lock = _get_repo_lock(project.github_repo)
     if lock.locked():
         logger.info(f"[WEBHOOK] Pipeline already running for '{sentry_project_slug}'")
         return {"status": "skipped", "reason": "Pipeline already in progress for this repo"}
@@ -249,13 +249,23 @@ def _execute_pipeline(req: PipelineRequest) -> PipelineResponse:
     steps: list[StepResult] = []
     issue_results: list[IssueFixResult] = []
     branch_name = None
+    temp_clone_dir = None
 
     sentry, github, jira = build_services(req.project)
 
     try:
+        # Auto-clone if no local repo_path provided
+        if not req.project.repo_path:
+            try:
+                temp_clone_dir = github.clone_repo()
+                steps.append(StepResult(step="clone_repo", status="ok", detail=temp_clone_dir))
+            except GitOperationError as e:
+                steps.append(StepResult(step="clone_repo", status="failed", detail=str(e)))
+                return PipelineResponse(status="failed", error=f"Clone failed: {e}", steps=steps)
+
         logger.info("[PIPELINE] ════════════════════════════════════════")
         logger.info(f"[PIPELINE] Pipeline started for {req.project.sentry_org}/{req.project.sentry_project}")
-        logger.info(f"[PIPELINE] Repo: {req.project.repo_path}")
+        logger.info(f"[PIPELINE] Repo: {github.repo_path}")
         logger.info(f"[PIPELINE] Query: {req.query}, dry_run: {req.dry_run}")
         logger.info("[PIPELINE] ════════════════════════════════════════")
 
@@ -401,3 +411,6 @@ def _execute_pipeline(req: PipelineRequest) -> PipelineResponse:
         if branch_name:
             github.cleanup(branch_name)
         return PipelineResponse(status="failed", error=str(e), steps=steps)
+    finally:
+        if temp_clone_dir:
+            GitHubService.cleanup_clone(temp_clone_dir)

@@ -91,7 +91,8 @@ def main():
     logger.info("=" * 60)
     logger.info(f"Sentry Automation Pipeline")
     logger.info(f"Project: {project.sentry_org}/{project.sentry_project}")
-    logger.info(f"Repo: {project.github_repo} ({project.repo_path})")
+    repo_display = project.repo_path or "(auto-clone)"
+    logger.info(f"Repo: {project.github_repo} ({repo_display})")
     logger.info(f"Branch: {project.base_branch}")
     logger.info(f"Dry run: {args.dry_run}")
     logger.info("=" * 60)
@@ -163,21 +164,23 @@ def _resolve_project_config(args) -> dict:
             sys.exit(1)
 
     # From inline args
-    if args.sentry_org and args.sentry_project and args.github_repo and args.repo_path:
-        return {
+    if args.sentry_org and args.sentry_project and args.github_repo:
+        config = {
             "sentry_org": args.sentry_org,
             "sentry_project": args.sentry_project,
             "sentry_token": args.sentry_token,
             "github_repo": args.github_repo,
             "github_token": args.github_token,
-            "repo_path": args.repo_path,
             "base_branch": args.base_branch,
             "jira_project_key": args.jira_project_key,
             "test_command": args.test_command,
             "max_retries": args.max_retries,
         }
+        if args.repo_path:
+            config["repo_path"] = args.repo_path
+        return config
 
-    logger.error("Provide either --config <file.json> or all required args (--sentry-org, --sentry-project, --github-repo, --repo-path)")
+    logger.error("Provide either --config <file.json> or required args (--sentry-org, --sentry-project, --github-repo)")
     return None
 
 

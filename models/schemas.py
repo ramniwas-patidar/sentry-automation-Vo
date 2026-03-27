@@ -14,8 +14,8 @@ class ProjectConfig(BaseModel):
     github_token: Optional[str] = None  # falls back to .env default
     base_branch: str = "main"
 
-    # Local repo
-    repo_path: str  # absolute path to local git clone
+    # Local repo (optional — if omitted, repo is auto-cloned from github_repo)
+    repo_path: Optional[str] = None
 
     # Jira (optional)
     jira_project_key: Optional[str] = None

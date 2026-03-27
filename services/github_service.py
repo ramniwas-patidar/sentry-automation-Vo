@@ -1,6 +1,8 @@
 import logging
 import os
+import shutil
 import subprocess
+import tempfile
 import time
 
 from github import Github, GithubException
@@ -67,6 +69,37 @@ class GitHubService:
             logger.info("[GIT] Cleanup done")
         except GitOperationError as e:
             logger.warning(f"[GIT] Cleanup warning: {e}")
+
+    # ── Temp clone operations ─────────────────────────────
+
+    def clone_repo(self) -> str:
+        """Clone the repo into a temp directory using HTTPS + token auth.
+        Sets self.repo_path to the clone directory. Returns the temp dir path."""
+        tmpdir = tempfile.mkdtemp(prefix="sentry-auto-")
+        clone_url = f"https://x-access-token:{self.github_token}@github.com/{self.github_repo}.git"
+        logger.info(f"[GIT] Cloning {self.github_repo} into {tmpdir}")
+        try:
+            subprocess.run(
+                ["git", "clone", "--depth=1", "--single-branch",
+                 "--branch", self.base_branch, clone_url, tmpdir],
+                capture_output=True, text=True, timeout=120, check=True,
+            )
+        except subprocess.CalledProcessError as e:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+            raise GitOperationError(f"Clone failed: {e.stderr.strip()}")
+        except subprocess.TimeoutExpired:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+            raise GitOperationError("Clone timed out after 120s")
+        self.repo_path = tmpdir
+        logger.info(f"[GIT] Clone complete: {tmpdir}")
+        return tmpdir
+
+    @staticmethod
+    def cleanup_clone(tmpdir: str) -> None:
+        """Remove a temp clone directory. Only deletes paths inside the system temp dir."""
+        if tmpdir and os.path.isdir(tmpdir) and tmpdir.startswith(tempfile.gettempdir()):
+            logger.info(f"[GIT] Removing temp clone: {tmpdir}")
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
     # ── GitHub API operations ─────────────────────────────
 
