@@ -110,10 +110,16 @@ def _generate_patch(
     file_tree = github.get_file_tree()
     user_message = _build_user_message(issue, source_context, file_tree, retry_context)
 
-    data = llm.chat_json(
-        system_prompt=PATCH_SYSTEM_PROMPT,
-        user_message=user_message,
-    )
+    logger.info(f"[PROCESSOR] Calling LLM for patch generation (issue #{issue.id})...")
+    try:
+        data = llm.chat_json(
+            system_prompt=PATCH_SYSTEM_PROMPT,
+            user_message=user_message,
+        )
+        logger.info(f"[PROCESSOR] LLM call ← OK (confidence={data.get('confidence', '?')})")
+    except Exception as e:
+        logger.error(f"[PROCESSOR] LLM call ← FAILED: {e}")
+        raise
 
     file_edits = data.get("file_edits", [])
     if not file_edits:

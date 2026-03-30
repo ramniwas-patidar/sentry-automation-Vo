@@ -18,16 +18,19 @@ class SentryService:
         return {"Authorization": f"Bearer {self.token}"}
 
     def verify_token(self) -> dict:
+        url = f"{self.base_url}/organizations/{self.org}/"
+        logger.info(f"[SENTRY] verify_token → {url}")
         try:
-            response = requests.get(
-                f"{self.base_url}/organizations/{self.org}/",
-                headers=self._headers(),
-                timeout=15,
-            )
+            response = requests.get(url, headers=self._headers(), timeout=15)
+            logger.info(f"[SENTRY] verify_token ← status={response.status_code}")
             if not response.ok:
+                logger.error(f"[SENTRY] verify_token ← FAILED: {response.status_code} {response.reason}")
                 return {"error": f"{response.status_code} {response.reason}", "detail": response.text}
-            return {"status": "ok", "organization": response.json().get("slug")}
+            slug = response.json().get("slug")
+            logger.info(f"[SENTRY] verify_token ← OK (org={slug})")
+            return {"status": "ok", "organization": slug}
         except requests.exceptions.RequestException as e:
+            logger.error(f"[SENTRY] verify_token ← EXCEPTION: {e}")
             return {"error": str(e)}
 
     def get_issues(self, query: str = "is:unresolved", cursor: str = None) -> dict:

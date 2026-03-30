@@ -73,11 +73,17 @@ def filter_issues(
     user_message = json.dumps(summaries, indent=2)
 
     # Call LLM
-    data = llm.chat_json(
-        system_prompt=FILTER_SYSTEM_PROMPT,
-        user_message=user_message,
-        temperature=0,
-    )
+    logger.info(f"[FILTER] Calling LLM for issue classification...")
+    try:
+        data = llm.chat_json(
+            system_prompt=FILTER_SYSTEM_PROMPT,
+            user_message=user_message,
+            temperature=0,
+        )
+        logger.info(f"[FILTER] LLM call ← OK")
+    except Exception as e:
+        logger.error(f"[FILTER] LLM call ← FAILED: {e}")
+        raise
 
     # Parse response
     items = _extract_items(data)

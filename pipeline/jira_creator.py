@@ -36,6 +36,7 @@ def create_jira_tickets(
         if issue and issue.stacktrace:
             description_lines.append(f"\nStacktrace:\n{issue.stacktrace[:500]}")
 
+        logger.info(f"[JIRA_CREATOR] Creating ticket for #{fix.issue_id}: {fix.title[:80]}")
         ticket_url = jira.create_ticket(
             issue_id=fix.issue_id,
             title=fix.title,
@@ -47,6 +48,9 @@ def create_jira_tickets(
         if ticket_url:
             fix.jira_ticket = ticket_url
             tickets.append(ticket_url)
+            logger.info(f"[JIRA_CREATOR] ✓ Ticket created: {ticket_url}")
+        else:
+            logger.error(f"[JIRA_CREATOR] ✗ Failed to create ticket for #{fix.issue_id}")
 
     logger.info(f"[JIRA_CREATOR] Created {len(tickets)}/{len(fixed)} tickets")
     return tickets

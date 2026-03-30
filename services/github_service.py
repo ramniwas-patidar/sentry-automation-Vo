@@ -135,7 +135,9 @@ class GitHubService:
 
     def get_file_tree(self) -> str:
         if not self.repo_path:
+            logger.warning("[GIT] get_file_tree: no repo_path set, skipping")
             return ""
+        logger.info(f"[GIT] get_file_tree → scanning {self.repo_path}")
         try:
             result = subprocess.run(
                 ["find", ".", "-type", "f",
@@ -153,14 +155,17 @@ class GitHubService:
             )]
             if len(relevant) > 100:
                 relevant = relevant[:100]
+            logger.info(f"[GIT] get_file_tree ← {len(relevant)} relevant files found")
             return "\n".join(relevant)
         except Exception as e:
-            logger.error(f"[GIT] File tree error: {e}")
+            logger.error(f"[GIT] get_file_tree ← FAILED: {e}")
             return ""
 
     def read_file(self, filepath: str) -> str:
+        original = filepath
         filepath = filepath.lstrip("./")
         full_path = os.path.join(self.repo_path, filepath)
+        logger.info(f"[GIT] read_file → {original}")
 
         if not os.path.isfile(full_path):
             for prefix in ["src/", "app/", "lib/", ""]:
@@ -170,20 +175,25 @@ class GitHubService:
                     filepath = os.path.join(prefix, filepath)
                     break
             else:
+                logger.warning(f"[GIT] read_file ← NOT FOUND: {original}")
                 return ""
 
         try:
             with open(full_path, "r") as f:
                 content = f.read()
-            if len(content) > 4000:
+            truncated = len(content) > 4000
+            if truncated:
                 content = content[:4000] + "\n... (truncated)"
+            logger.info(f"[GIT] read_file ← OK: {filepath} ({len(content)} chars{', truncated' if truncated else ''})")
             return f"File: {filepath}\n```\n{content}\n```"
-        except Exception:
+        except Exception as e:
+            logger.error(f"[GIT] read_file ← ERROR reading {filepath}: {e}")
             return ""
 
     def find_related_files(self, culprit: str) -> list[tuple[str, str]]:
         if not self.repo_path:
             return []
+        logger.info(f"[GIT] find_related_files → culprit='{culprit}'")
         try:
             result = subprocess.run(
                 ["grep", "-rl", "--include=*.tsx", "--include=*.ts",
@@ -195,6 +205,7 @@ class GitHubService:
                 capture_output=True, text=True, timeout=10,
             )
             files = [f for f in result.stdout.strip().split("\n") if f]
+            logger.info(f"[GIT] find_related_files ← {len(files)} file(s) matched: {files[:3]}")
             results = []
             for filepath in files[:3]:
                 full_path = os.path.join(self.repo_path, filepath)
@@ -204,7 +215,8 @@ class GitHubService:
                     content = content[:4000] + "\n... (truncated)"
                 results.append((filepath, content))
             return results
-        except Exception:
+        except Exception as e:
+            logger.error(f"[GIT] find_related_files ← FAILED: {e}")
             return []
 
     def run_tests(self) -> tuple[bool, str]:
