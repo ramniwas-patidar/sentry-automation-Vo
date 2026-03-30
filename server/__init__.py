@@ -2,12 +2,41 @@ import hashlib
 import hmac
 import json
 import logging
+import os
 import threading
 import time
+from logging.handlers import RotatingFileHandler
 
 from fastapi import FastAPI, HTTPException, Request
 
 from config import settings
+
+# ── Logging setup: console + rotating file ────────────────
+os.makedirs(settings.LOG_DIR, exist_ok=True)
+log_file = os.path.join(settings.LOG_DIR, "sentry-automation.log")
+
+log_format = logging.Formatter(
+    "%(asctime)s %(levelname)s %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+
+# File handler — 10 MB per file, keep 5 backups
+file_handler = RotatingFileHandler(
+    log_file, maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8",
+)
+file_handler.setLevel(logging.INFO)
+file_handler.setFormatter(log_format)
+
+# Console handler
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.INFO)
+console_handler.setFormatter(log_format)
+
+# Apply to root logger so ALL modules are captured
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.INFO)
+root_logger.addHandler(file_handler)
+root_logger.addHandler(console_handler)
 from models.schemas import (
     IssueFixResult,
     PipelineRequest,

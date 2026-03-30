@@ -26,6 +26,9 @@ class Settings(BaseSettings):
     WEBHOOK_COOLDOWN_SECONDS: int = 300  # 5 min debounce per project
     PROJECTS_DIR: str = "projects"  # directory containing project config JSONs
 
+    # Logging
+    LOG_DIR: str = "logs"  # directory for log files
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
