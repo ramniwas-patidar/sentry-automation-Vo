@@ -10,51 +10,67 @@ from services.llm_service import get_llm
 
 logger = logging.getLogger(__name__)
 
-TEST_GEN_SYSTEM_PROMPT = """You are a senior QA engineer. Your job is to write a test case that REPRODUCES a specific bug reported by Sentry.
+TEST_GEN_SYSTEM_PROMPT = """You are a senior QA engineer. Your job is to write a SOURCE VERIFICATION test that checks whether a specific bug has been fixed in the actual source file.
 
 You will receive:
 - The error title and message
 - The stacktrace showing where the error occurred
-- The relevant source code file(s)
+- The relevant source code file(s) with their paths
 - The project file structure
 
-Your test must:
-1. FAIL when the bug exists (before the fix)
-2. PASS when the bug is fixed (after the fix)
-3. Be self-contained and not depend on external services, databases, or network
-4. Use the project's existing test framework (detect from file structure)
-5. Import and test the actual function/component that has the bug
-6. Be placed in a sentry-fix test directory
+## How the test works:
+The test uses `fs.readFileSync` to read the ACTUAL source file and checks:
+1. The buggy code pattern should NOT exist in the file (test FAILS before fix, PASSES after fix)
+2. Optionally, a fix-related pattern SHOULD exist
 
-Test framework detection:
-- If you see jest.config, __tests__/, *.test.ts/tsx/js → use Jest
-- If you see vitest.config → use Vitest
-- If you see pytest, tests/, conftest.py → use pytest
-- If you see mocha, .mocharc → use Mocha
-- Default for TypeScript/JavaScript: Jest
-- Default for Python: pytest
+This approach ensures the test verifies the REAL source file, not an inline copy.
+
+## Example test:
+```javascript
+const fs = require('fs');
+const path = require('path');
+
+describe('Sentry Fix Verification: #12345', () => {
+  const filePath = path.resolve(__dirname, '../../src/lib/hooks/useAddToCart.ts');
+  let sourceCode;
+
+  beforeAll(() => {
+    sourceCode = fs.readFileSync(filePath, 'utf-8');
+  });
+
+  test('buggy pattern should be removed from source', () => {
+    // This exact buggy code should NOT exist after the fix
+    expect(sourceCode).not.toContain('throw new Error("some buggy code")');
+  });
+
+  test('source file should contain error handling', () => {
+    // After fix, the file should have proper handling
+    expect(sourceCode).toMatch(/if\\s*\\(.*\\)\\s*\\{/);  // some guard check
+  });
+});
+```
+
+## Key rules:
+- Use `fs.readFileSync` with `path.resolve(__dirname, '../../<relative-path>')` to read the actual source file
+- The `__dirname` path should navigate from `__tests__/sentry-fix/` to the repo root
+- Test that the BUGGY code pattern does NOT exist (use `not.toContain` or `not.toMatch`)
+- The buggy pattern should be an EXACT string or regex from the source code that causes the error
+- Identify the specific line(s) of code that cause the bug from the stacktrace and source code
+- Use .js extension, no TypeScript, no imports from project
+- One describe block, 1-3 test cases
 
 IMPORTANT: The test file path MUST be unique per issue. Use the issue ID in the filename.
-Example: "__tests__/sentry-fix/issue-7374392450.test.js" or "tests/sentry_fix/test_issue_7374392450.py"
 
 Return a JSON object with these exact keys:
 {
   "test_file_path": "__tests__/sentry-fix/issue-<ISSUE_ID>.test.js",
   "test_content": "full test file content as a string",
-  "run_command": "command to run just this test file (e.g., npx jest __tests__/sentry-fix/issue-<ISSUE_ID>.test.js --no-coverage)",
-  "description": "one-line description of what the test verifies"
+  "run_command": "npx jest __tests__/sentry-fix/issue-<ISSUE_ID>.test.js --no-coverage",
+  "description": "one-line description of what the test verifies",
+  "source_file": "relative path to the source file being verified"
 }
 
-Rules:
-- DO NOT import from the project source files. Instead, COPY the relevant function(s) directly into the test file. This ensures the test runs standalone without needing build tools or module resolution.
-- The test should directly exercise the code path that causes the error
-- For TypeError/ReferenceError: test with the exact input that triggers it
-- For UI components: test the component logic, not rendering (no React/JSX in tests)
-- Keep tests simple and focused on the specific bug
-- The test must work with plain Node.js/Jest without TypeScript compilation
-- Use .js extension for test files (not .ts/.tsx) to avoid needing ts-jest
-- Do not use import/export syntax. Use require() or inline the code directly.
-- Return ONLY valid JSON, no markdown code fences"""
+Return ONLY valid JSON, no markdown code fences."""
 
 
 @dataclass
