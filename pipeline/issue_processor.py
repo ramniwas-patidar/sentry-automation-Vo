@@ -5,6 +5,9 @@ import os
 from models.schemas import IssueFixResult, PatchResult, SentryIssue
 from services.github_service import GitHubService
 from services.llm_service import get_llm
+from pipeline.test_generator import (
+    generate_test, write_test_file, run_issue_test, build_test_result,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +51,28 @@ def process_issue(
     dry_run: bool = False,
     max_retries: int = 3,
 ) -> IssueFixResult:
-    """Generate and apply a fix for a single issue. Returns the result."""
+    """Generate test, verify bug, apply fix, verify fix. TDD approach."""
+
+    # ── Step A: Generate test case ────────────────────────
+    generated_test = None
+    test_result = None
+    try:
+        generated_test = generate_test(issue, github)
+        write_test_file(generated_test, github.repo_path)
+    except Exception as e:
+        logger.warning(f"[PROCESSOR] Test generation failed for #{issue.id}: {e} — proceeding without TDD")
+
+    # ── Step B: Run pre-fix test (expect FAIL) ────────────
+    pre_fix_passed = False
+    pre_fix_output = ""
+    if generated_test and not dry_run:
+        pre_fix_passed, pre_fix_output = run_issue_test(generated_test, github.repo_path)
+        if pre_fix_passed:
+            logger.warning(f"[PROCESSOR] Pre-fix test PASSED for #{issue.id} — test doesn't catch the bug, proceeding as unverified")
+        else:
+            logger.info(f"[PROCESSOR] ✓ Pre-fix test FAILED for #{issue.id} — bug confirmed")
+
+    # ── Step C: Generate and apply fix (with retries) ─────
     retry_context = []
 
     for attempt in range(1, max_retries + 1):
@@ -68,10 +92,16 @@ def process_issue(
                 files = [e.get("filepath", "") for e in edits]
             except json.JSONDecodeError:
                 files = []
+            if generated_test:
+                test_result = build_test_result(
+                    issue, generated_test,
+                    pre_fix_passed=False, pre_fix_output="(dry run)",
+                    post_fix_passed=False, post_fix_output="(dry run)",
+                )
             return IssueFixResult(
                 issue_id=issue.id, title=issue.title,
                 status="fixed", confidence=patch_result.confidence,
-                files_changed=files,
+                files_changed=files, test_result=test_result,
             )
 
         applied, apply_error = _apply_file_edits(patch_result.diff, github.repo_path)
@@ -87,15 +117,42 @@ def process_issue(
             files = []
         logger.info(f"[PROCESSOR] ✓ Applied: {files}")
 
+        # ── Step D: Run post-fix test (expect PASS) ───────
+        post_fix_passed = False
+        post_fix_output = ""
+        if generated_test:
+            post_fix_passed, post_fix_output = run_issue_test(generated_test, github.repo_path)
+            test_result = build_test_result(
+                issue, generated_test,
+                pre_fix_passed, pre_fix_output,
+                post_fix_passed, post_fix_output,
+            )
+
+            if post_fix_passed:
+                logger.info(f"[PROCESSOR] ✓ Post-fix test PASSED for #{issue.id} — fix verified!")
+            else:
+                logger.warning(f"[PROCESSOR] ✗ Post-fix test FAILED for #{issue.id} — fix may be incomplete")
+                # Revert the file edits and retry
+                _revert_file_edits(patch_result.diff, github.repo_path)
+                retry_context.append({"diff": patch_result.diff, "error": f"Post-fix test failed: {post_fix_output[-200:]}"})
+                continue
+
         return IssueFixResult(
             issue_id=issue.id, title=issue.title,
             status="fixed", confidence=patch_result.confidence,
-            files_changed=files,
+            files_changed=files, test_result=test_result,
         )
 
+    # All retries exhausted
+    if generated_test:
+        test_result = build_test_result(
+            issue, generated_test,
+            pre_fix_passed, pre_fix_output,
+        )
     return IssueFixResult(
         issue_id=issue.id, title=issue.title,
         status="failed", error=f"Failed after {max_retries} attempts",
+        test_result=test_result,
     )
 
 
@@ -170,6 +227,33 @@ def _apply_file_edits(edits_json: str, repo_path: str) -> tuple[bool, str]:
 
     logger.info(f"[PROCESSOR] All {len(edits)} edit(s) applied")
     return True, ""
+
+
+def _revert_file_edits(edits_json: str, repo_path: str) -> None:
+    """Revert file edits by swapping replacement back to original."""
+    logger.info("[PROCESSOR] Reverting file edits...")
+    try:
+        edits = json.loads(edits_json)
+    except json.JSONDecodeError:
+        return
+
+    for edit in edits:
+        filepath = edit.get("filepath", "")
+        original = edit.get("original", "")
+        replacement = edit.get("replacement", "")
+        full_path = os.path.join(repo_path, filepath)
+
+        if not os.path.isfile(full_path):
+            continue
+
+        with open(full_path, "r") as f:
+            content = f.read()
+
+        if replacement in content:
+            new_content = content.replace(replacement, original, 1)
+            with open(full_path, "w") as f:
+                f.write(new_content)
+            logger.info(f"[PROCESSOR] ✓ Reverted: {filepath}")
 
 
 def _get_source_context(issue: SentryIssue, github: GitHubService) -> str:

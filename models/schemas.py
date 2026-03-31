@@ -74,6 +74,18 @@ class FilteredIssue(BaseModel):
     category: Optional[str] = None
 
 
+class TestResult(BaseModel):
+    """Result of TDD verification for a single issue."""
+    issue_id: str
+    test_file: str
+    test_description: str = ""
+    pre_fix_passed: bool = False       # Should be False (bug exists)
+    pre_fix_output: str = ""
+    post_fix_passed: bool = False      # Should be True (fix works)
+    post_fix_output: str = ""
+    verified: bool = False             # True only if pre=FAIL and post=PASS
+
+
 class IssueFixResult(BaseModel):
     """Result of fixing a single issue within the batch."""
     issue_id: str
@@ -83,6 +95,7 @@ class IssueFixResult(BaseModel):
     confidence: float = 0.0
     files_changed: list[str] = []
     jira_ticket: Optional[str] = None
+    test_result: Optional[TestResult] = None
 
 
 class PipelineResponse(BaseModel):

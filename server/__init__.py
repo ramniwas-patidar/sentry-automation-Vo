@@ -350,8 +350,8 @@ def _execute_pipeline(req: PipelineRequest) -> PipelineResponse:
                     issue_results=issue_results, steps=steps,
                 )
 
-        # ─── STEP 4: Fix each issue one-by-one ──────────
-        logger.info(f"[PIPELINE] Step 4: Fixing {len(relevant_issues)} issues...")
+        # ─── STEP 4: TDD fix each issue (test → fix → verify) ──
+        logger.info(f"[PIPELINE] Step 4: TDD fixing {len(relevant_issues)} issues (generate test → verify bug → fix → verify fix)...")
         for idx, issue in enumerate(relevant_issues):
             logger.info(f"[PIPELINE] Issue {idx+1}/{len(relevant_issues)}: #{issue.id}")
             fix_result = process_issue(
@@ -360,8 +360,18 @@ def _execute_pipeline(req: PipelineRequest) -> PipelineResponse:
             )
             issue_results.append(fix_result)
 
+            # Log TDD result
+            if fix_result.test_result:
+                tr = fix_result.test_result
+                logger.info(f"[PIPELINE]   Test: {tr.test_file} | Pre-fix: {'FAIL' if not tr.pre_fix_passed else 'PASS'} | Post-fix: {'PASS' if tr.post_fix_passed else 'FAIL'} | {'VERIFIED' if tr.verified else 'UNVERIFIED'}")
+
         fixed_count = sum(1 for r in issue_results if r.status == "fixed")
         failed_count = sum(1 for r in issue_results if r.status == "failed")
+        verified_count = sum(1 for r in issue_results if r.test_result and r.test_result.verified)
+        steps.append(StepResult(
+            step="tdd_fix", status="ok",
+            detail=f"{fixed_count} fixed, {verified_count} verified, {failed_count} failed",
+        ))
 
         if fixed_count == 0:
             if branch_name:
@@ -421,7 +431,7 @@ def _execute_pipeline(req: PipelineRequest) -> PipelineResponse:
         # ─── DONE ────────────────────────────────────────
         final_status = "success" if pr_url else "partial"
         logger.info("[PIPELINE] ════════════════════════════════════════")
-        logger.info(f"[PIPELINE] Done! {fixed_count} fixed, {len(filtered_issues)} filtered, {failed_count} failed")
+        logger.info(f"[PIPELINE] Done! {fixed_count} fixed ({verified_count} verified), {len(filtered_issues)} filtered, {failed_count} failed")
         logger.info("[PIPELINE] ════════════════════════════════════════")
 
         return PipelineResponse(

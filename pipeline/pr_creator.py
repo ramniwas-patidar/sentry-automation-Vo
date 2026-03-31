@@ -44,6 +44,19 @@ def build_pr_content(
             f"  - [View in Sentry]({link})"
         )
 
+    # Test verification results
+    tested = [r for r in fixed if r.test_result]
+    if tested:
+        body.append("\n## Test Verification")
+        body.append("| Issue | Test File | Pre-Fix | Post-Fix | Status |")
+        body.append("|-------|-----------|---------|----------|--------|")
+        for r in tested:
+            tr = r.test_result
+            pre = "FAIL" if not tr.pre_fix_passed else "PASS"
+            post = "PASS" if tr.post_fix_passed else "FAIL"
+            status = "Verified" if tr.verified else "Unverified"
+            body.append(f"| #{r.issue_id} | `{tr.test_file}` | {pre} | {post} | {status} |")
+
     if filtered:
         body.append("\n## Filtered Issues (resolved in Sentry)")
         for r in filtered:
