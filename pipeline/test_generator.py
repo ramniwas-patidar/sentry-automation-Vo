@@ -35,22 +35,25 @@ Test framework detection:
 - Default for Python: pytest
 
 IMPORTANT: The test file path MUST be unique per issue. Use the issue ID in the filename.
-Example: "__tests__/sentry-fix/issue-7374392450.test.ts" or "tests/sentry_fix/test_issue_7374392450.py"
+Example: "__tests__/sentry-fix/issue-7374392450.test.js" or "tests/sentry_fix/test_issue_7374392450.py"
 
 Return a JSON object with these exact keys:
 {
-  "test_file_path": "__tests__/sentry-fix/issue-<ISSUE_ID>.test.ts",
+  "test_file_path": "__tests__/sentry-fix/issue-<ISSUE_ID>.test.js",
   "test_content": "full test file content as a string",
-  "run_command": "command to run just this test file (e.g., npx jest __tests__/sentry-fix/issue-<ISSUE_ID>.test.ts --no-coverage)",
+  "run_command": "command to run just this test file (e.g., npx jest __tests__/sentry-fix/issue-<ISSUE_ID>.test.js --no-coverage)",
   "description": "one-line description of what the test verifies"
 }
 
 Rules:
+- DO NOT import from the project source files. Instead, COPY the relevant function(s) directly into the test file. This ensures the test runs standalone without needing build tools or module resolution.
 - The test should directly exercise the code path that causes the error
 - For TypeError/ReferenceError: test with the exact input that triggers it
-- For UI components: test the component logic, not rendering
+- For UI components: test the component logic, not rendering (no React/JSX in tests)
 - Keep tests simple and focused on the specific bug
-- Use mocks/stubs for dependencies the function needs
+- The test must work with plain Node.js/Jest without TypeScript compilation
+- Use .js extension for test files (not .ts/.tsx) to avoid needing ts-jest
+- Do not use import/export syntax. Use require() or inline the code directly.
 - Return ONLY valid JSON, no markdown code fences"""
 
 
@@ -118,6 +121,8 @@ def run_issue_test(test: GeneratedTest, repo_path: str, timeout: int = 120) -> t
         output = (result.stdout + "\n" + result.stderr).strip()
         passed = result.returncode == 0
         logger.info(f"[TEST_GEN] Test {'PASSED' if passed else 'FAILED'} (exit={result.returncode})")
+        if not passed:
+            logger.info(f"[TEST_GEN] Test output:\n{output[-500:]}")
         return passed, output[-1000:]  # Keep last 1000 chars
     except subprocess.TimeoutExpired:
         logger.warning(f"[TEST_GEN] Test timed out after {timeout}s")
