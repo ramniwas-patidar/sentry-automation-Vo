@@ -27,6 +27,7 @@ class ProjectConfig(BaseModel):
     # Pipeline
     test_command: str = ""
     max_retries: int = 3
+    max_issues: int = 25  # max issues to process per pipeline run (after filtering)
 
 
 class SentryIssue(BaseModel):

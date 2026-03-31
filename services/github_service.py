@@ -220,6 +220,33 @@ class GitHubService:
         except Exception:
             return ""
 
+    def search_files_by_keyword(self, keyword: str) -> list[tuple[str, str]]:
+        """Search for a keyword in code files. Returns up to 5 matching files with content."""
+        if not self.repo_path or not keyword or len(keyword) < 3:
+            return []
+        try:
+            result = subprocess.run(
+                ["grep", "-rl", "--include=*.tsx", "--include=*.ts",
+                 "--include=*.jsx", "--include=*.js", "--include=*.py",
+                 "--exclude-dir=node_modules", "--exclude-dir=.git",
+                 "--exclude-dir=.next", "--exclude-dir=dist",
+                 keyword],
+                cwd=self.repo_path,
+                capture_output=True, text=True, timeout=10,
+            )
+            files = [f for f in result.stdout.strip().split("\n") if f]
+            results = []
+            for filepath in files[:5]:
+                full_path = os.path.join(self.repo_path, filepath)
+                with open(full_path, "r") as f:
+                    content = f.read()
+                if len(content) > 4000:
+                    content = content[:4000] + "\n... (truncated)"
+                results.append((filepath, content))
+            return results
+        except Exception:
+            return []
+
     def find_related_files(self, culprit: str) -> list[tuple[str, str]]:
         if not self.repo_path:
             return []

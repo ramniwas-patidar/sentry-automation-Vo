@@ -249,15 +249,30 @@ def _revert_file_edits(edits_json: str, repo_path: str) -> None:
 def _get_source_context(issue: SentryIssue, github: GitHubService) -> str:
     parts = []
 
+    # 1. Read the file from stacktrace (if Sentry identified it)
     if issue.filename:
         content = github.read_file(issue.filename)
         if content:
             parts.append(content)
 
+    # 2. Search by culprit path
     if issue.culprit and issue.culprit != "/":
         for filepath, content in github.find_related_files(issue.culprit)[:3]:
             parts.append(f"File: {filepath}\n```\n{content}\n```")
 
+    # 3. If no source found yet, extract keywords from error title and search
+    if not parts:
+        keywords = _extract_keywords_from_title(issue.title)
+        logger.info(f"[PROCESSOR] No source from stacktrace, searching by keywords: {keywords}")
+        for keyword in keywords:
+            results = github.search_files_by_keyword(keyword)
+            if results:
+                logger.info(f"[PROCESSOR] Found {len(results)} files matching '{keyword}'")
+                for filepath, content in results[:3]:
+                    parts.append(f"File: {filepath}\n```\n{content}\n```")
+                break  # Found files with first keyword, stop searching
+
+    # 4. Fallback to common entry points
     if not parts:
         for entry in ["src/app/page.tsx", "src/app/layout.tsx", "app/page.tsx",
                        "app/layout.tsx", "pages/index.tsx", "pages/_app.tsx"]:
@@ -268,6 +283,30 @@ def _get_source_context(issue: SentryIssue, github: GitHubService) -> str:
                     break
 
     return "\n\n".join(parts) if parts else "(No source files found)"
+
+
+def _extract_keywords_from_title(title: str) -> list[str]:
+    """Extract searchable function/variable names from error title."""
+    import re
+    keywords = []
+
+    # Extract camelCase/PascalCase identifiers (function names like addToCart, UserService)
+    identifiers = re.findall(r'\b[a-z][a-zA-Z]{4,}\b|\b[A-Z][a-zA-Z]{4,}\b', title)
+    skip = {"error", "cannot", "undefined", "reading", "properties", "failed", "missing",
+            "thrown", "invalid", "typeerror", "referenceerror", "rangeerror", "syntaxerror",
+            "wrong", "defined", "sentry", "maximum", "stack", "exceeded", "component",
+            "render", "conflict", "detected", "created", "without", "cleanup"}
+    for ident in identifiers:
+        if ident.lower() not in skip:
+            keywords.append(ident)
+
+    # Extract text after colon patterns like "conditions:addToCart"
+    colon_parts = re.findall(r':(\w{3,})', title)
+    for part in colon_parts:
+        if part not in keywords:
+            keywords.append(part)
+
+    return keywords[:3]  # Return top 3 keywords
 
 
 def _build_user_message(

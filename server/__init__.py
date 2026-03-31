@@ -335,6 +335,12 @@ def _execute_pipeline(req: PipelineRequest) -> PipelineResponse:
                 issue_results=issue_results, steps=steps,
             )
 
+        # Apply max_issues limit (all issues were filtered, now cap for processing)
+        max_issues = req.project.max_issues
+        if len(relevant_issues) > max_issues:
+            logger.info(f"[PIPELINE] Capping {len(relevant_issues)} relevant issues to max_issues={max_issues}")
+            relevant_issues = relevant_issues[:max_issues]
+
         # ─── STEP 3: Create branch ──────────────────────
         if not req.dry_run:
             logger.info("[PIPELINE] Step 3: Creating git branch...")

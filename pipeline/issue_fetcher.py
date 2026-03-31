@@ -26,12 +26,25 @@ def fetch_all_issues(
         return [SentryIssue(**details)]
 
     logger.info(f"[FETCHER] Fetching all issues with query: {query}")
-    result = sentry.get_issues(query=query)
-    if "error" in result:
-        raise ValueError(f"Failed to fetch issues: {result['error']}")
+    issues = []
+    cursor = None
+    page = 1
 
-    issues = result.get("issues", [])
-    logger.info(f"[FETCHER] Found {len(issues)} issues")
+    while True:
+        result = sentry.get_issues(query=query, cursor=cursor)
+        if "error" in result:
+            raise ValueError(f"Failed to fetch issues: {result['error']}")
+
+        page_issues = result.get("issues", [])
+        issues.extend(page_issues)
+        logger.info(f"[FETCHER] Page {page}: {len(page_issues)} issues (total so far: {len(issues)})")
+
+        cursor = result.get("next_cursor")
+        if not cursor or not page_issues:
+            break
+        page += 1
+
+    logger.info(f"[FETCHER] Found {len(issues)} total issues across {page} page(s)")
     if not issues:
         raise ValueError(f"No issues found for query: {query}")
 

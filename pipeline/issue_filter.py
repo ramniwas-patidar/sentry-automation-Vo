@@ -56,32 +56,43 @@ def filter_issues(
 
     llm = get_llm()
 
-    # Build summaries for LLM
-    summaries = []
-    for issue in issues:
-        s = {
-            "issue_id": issue.id,
-            "title": issue.title,
-            "culprit": issue.culprit,
-            "level": issue.level,
-            "count": issue.count,
-        }
-        if issue.stacktrace:
-            s["stacktrace_preview"] = issue.stacktrace[:500]
-        summaries.append(s)
+    # Process in batches of 20 to stay within LLM context limits
+    BATCH_SIZE = 20
+    all_items = []
 
-    user_message = json.dumps(summaries, indent=2)
+    for batch_start in range(0, len(issues), BATCH_SIZE):
+        batch = issues[batch_start:batch_start + BATCH_SIZE]
+        batch_num = (batch_start // BATCH_SIZE) + 1
+        total_batches = (len(issues) + BATCH_SIZE - 1) // BATCH_SIZE
 
-    # Call LLM
-    data = llm.chat_json(
-        system_prompt=FILTER_SYSTEM_PROMPT,
-        user_message=user_message,
-        temperature=0,
-    )
+        if total_batches > 1:
+            logger.info(f"[FILTER] Batch {batch_num}/{total_batches}: filtering {len(batch)} issues...")
+
+        summaries = []
+        for issue in batch:
+            s = {
+                "issue_id": issue.id,
+                "title": issue.title,
+                "culprit": issue.culprit,
+                "level": issue.level,
+                "count": issue.count,
+            }
+            if issue.stacktrace:
+                s["stacktrace_preview"] = issue.stacktrace[:500]
+            summaries.append(s)
+
+        user_message = json.dumps(summaries, indent=2)
+
+        data = llm.chat_json(
+            system_prompt=FILTER_SYSTEM_PROMPT,
+            user_message=user_message,
+            temperature=0,
+        )
+
+        all_items.extend(_extract_items(data))
 
     # Parse response
-    items = _extract_items(data)
-    filter_results = _build_filter_results(items, issues)
+    filter_results = _build_filter_results(all_items, issues)
 
     # Split into relevant and filtered
     relevant_ids = {r.issue_id for r in filter_results if r.is_relevant}
