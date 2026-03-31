@@ -108,6 +108,7 @@ def generate_test(issue: SentryIssue, github: GitHubService) -> GeneratedTest:
     logger.info(f"[TEST_GEN] ✓ Generated: {test.test_file_path}")
     logger.info(f"[TEST_GEN]   Description: {test.description}")
     logger.info(f"[TEST_GEN]   Run command: {test.run_command}")
+    logger.info(f"[TEST_GEN]   Test content:\n{test.test_content}")
     return test
 
 
@@ -203,9 +204,26 @@ def _build_test_prompt(
     if issue.stacktrace:
         parts.append(f"\n**Stacktrace:**\n```\n{issue.stacktrace}\n```")
     if source_context:
-        parts.append(f"\n**Source Code:**\n{source_context}")
+        parts.append(f"\n**Source Code (with file paths):**\n{source_context}")
     if file_tree:
         parts.append(f"\n**Project Files:**\n```\n{file_tree}\n```")
 
-    parts.append("\nWrite a test that FAILS when this bug exists and PASSES when fixed.")
+    # Extract source file paths from source_context for the LLM
+    import re
+    source_files = re.findall(r'File: (.+?)$', source_context, re.MULTILINE) if source_context else []
+    if source_files:
+        parts.append(f"\n**Source files to verify (use these paths with fs.readFileSync):**")
+        for sf in source_files:
+            parts.append(f"- {sf}")
+
+    parts.append("""
+Write a SOURCE VERIFICATION test using fs.readFileSync that:
+1. Reads the ACTUAL source file listed above
+2. Checks that the EXACT buggy code pattern exists (test FAILS before fix = bug confirmed)
+3. After fix, the buggy pattern is removed so test PASSES
+
+Use: const sourceCode = fs.readFileSync(path.resolve(__dirname, '../../<filepath>'), 'utf-8');
+Then: expect(sourceCode).not.toContain('<exact buggy code>');
+
+The buggy code pattern must be an EXACT substring from the source code shown above that causes the error.""")
     return "\n".join(parts)
