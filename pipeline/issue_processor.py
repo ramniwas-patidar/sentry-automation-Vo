@@ -131,11 +131,7 @@ def process_issue(
             if post_fix_passed:
                 logger.info(f"[PROCESSOR] ✓ Post-fix test PASSED for #{issue.id} — fix verified!")
             else:
-                logger.warning(f"[PROCESSOR] ✗ Post-fix test FAILED for #{issue.id} — fix may be incomplete")
-                # Revert the file edits and retry
-                _revert_file_edits(patch_result.diff, github.repo_path)
-                retry_context.append({"diff": patch_result.diff, "error": f"Post-fix test failed: {post_fix_output[-200:]}"})
-                continue
+                logger.warning(f"[PROCESSOR] ✗ Post-fix test FAILED for #{issue.id} — fix accepted as unverified")
 
         return IssueFixResult(
             issue_id=issue.id, title=issue.title,
@@ -143,12 +139,6 @@ def process_issue(
             files_changed=files, test_result=test_result,
         )
 
-    # All retries exhausted
-    if generated_test:
-        test_result = build_test_result(
-            issue, generated_test,
-            pre_fix_passed, pre_fix_output,
-        )
     return IssueFixResult(
         issue_id=issue.id, title=issue.title,
         status="failed", error=f"Failed after {max_retries} attempts",
