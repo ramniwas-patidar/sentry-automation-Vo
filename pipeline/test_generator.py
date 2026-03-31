@@ -34,11 +34,14 @@ Test framework detection:
 - Default for TypeScript/JavaScript: Jest
 - Default for Python: pytest
 
+IMPORTANT: The test file path MUST be unique per issue. Use the issue ID in the filename.
+Example: "__tests__/sentry-fix/issue-7374392450.test.ts" or "tests/sentry_fix/test_issue_7374392450.py"
+
 Return a JSON object with these exact keys:
 {
-  "test_file_path": "relative/path/to/test/file",
+  "test_file_path": "__tests__/sentry-fix/issue-<ISSUE_ID>.test.ts",
   "test_content": "full test file content as a string",
-  "run_command": "command to run just this test file (e.g., npx jest path/to/test.ts --no-coverage)",
+  "run_command": "command to run just this test file (e.g., npx jest __tests__/sentry-fix/issue-<ISSUE_ID>.test.ts --no-coverage)",
   "description": "one-line description of what the test verifies"
 }
 

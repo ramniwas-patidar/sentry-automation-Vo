@@ -92,7 +92,46 @@ class GitHubService:
             raise GitOperationError("Clone timed out after 120s")
         self.repo_path = tmpdir
         logger.info(f"[GIT] Clone complete: {tmpdir}")
+
+        # Install dependencies if package.json exists (needed for test runner)
+        self._install_dependencies(tmpdir)
+
         return tmpdir
+
+    @staticmethod
+    def _install_dependencies(repo_path: str) -> None:
+        """Install project dependencies if a package manager lock file exists."""
+        lock_files = {
+            "package-lock.json": ["npm", "install", "--ignore-scripts"],
+            "yarn.lock": ["yarn", "install", "--frozen-lockfile", "--ignore-scripts"],
+            "pnpm-lock.yaml": ["pnpm", "install", "--frozen-lockfile", "--ignore-scripts"],
+        }
+        for lock_file, cmd in lock_files.items():
+            if os.path.isfile(os.path.join(repo_path, lock_file)):
+                logger.info(f"[GIT] Found {lock_file}, installing dependencies...")
+                try:
+                    subprocess.run(
+                        cmd, cwd=repo_path,
+                        capture_output=True, text=True, timeout=300,
+                    )
+                    logger.info("[GIT] ✓ Dependencies installed")
+                except subprocess.TimeoutExpired:
+                    logger.warning("[GIT] Dependency install timed out (300s) — continuing without")
+                except Exception as e:
+                    logger.warning(f"[GIT] Dependency install failed: {e} — continuing without")
+                return
+
+        # Check for Python projects
+        if os.path.isfile(os.path.join(repo_path, "requirements.txt")):
+            logger.info("[GIT] Found requirements.txt, installing dependencies...")
+            try:
+                subprocess.run(
+                    ["pip", "install", "-r", "requirements.txt", "-q"],
+                    cwd=repo_path, capture_output=True, text=True, timeout=300,
+                )
+                logger.info("[GIT] ✓ Dependencies installed")
+            except Exception as e:
+                logger.warning(f"[GIT] Dependency install failed: {e} — continuing without")
 
     @staticmethod
     def cleanup_clone(tmpdir: str) -> None:
