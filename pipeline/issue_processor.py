@@ -6,7 +6,7 @@ from models.schemas import IssueFixResult, PatchResult, SentryIssue
 from services.github_service import GitHubService
 from services.llm_service import get_llm
 from pipeline.test_generator import (
-    generate_test, write_test_file, run_issue_test, build_test_result,
+    build_test_from_patch, write_test_file, run_issue_test, build_test_result,
 )
 
 logger = logging.getLogger(__name__)
@@ -51,33 +51,14 @@ def process_issue(
     dry_run: bool = False,
     max_retries: int = 3,
 ) -> IssueFixResult:
-    """Generate test, verify bug, apply fix, verify fix. TDD approach."""
-
-    # ── Step A: Generate test case ────────────────────────
-    generated_test = None
-    test_result = None
-    try:
-        generated_test = generate_test(issue, github)
-        write_test_file(generated_test, github.repo_path)
-    except Exception as e:
-        logger.warning(f"[PROCESSOR] Test generation failed for #{issue.id}: {e} — proceeding without TDD")
-
-    # ── Step B: Run pre-fix test (expect FAIL) ────────────
-    pre_fix_passed = False
-    pre_fix_output = ""
-    if generated_test and not dry_run:
-        pre_fix_passed, pre_fix_output = run_issue_test(generated_test, github.repo_path)
-        if pre_fix_passed:
-            logger.warning(f"[PROCESSOR] Pre-fix test PASSED for #{issue.id} — test doesn't catch the bug, proceeding as unverified")
-        else:
-            logger.info(f"[PROCESSOR] ✓ Pre-fix test FAILED for #{issue.id} — bug confirmed")
-
-    # ── Step C: Generate and apply fix (with retries) ─────
+    """Fix issue, then verify with deterministic test built from the fix itself."""
     retry_context = []
+    test_result = None
 
     for attempt in range(1, max_retries + 1):
         logger.info(f"[PROCESSOR] Attempt {attempt}/{max_retries} for #{issue.id}")
 
+        # ── Step 1: Generate fix ──────────────────────────
         try:
             patch_result = _generate_patch(issue, github, retry_context)
             logger.info(f"[PROCESSOR] ✓ Patch generated (confidence: {patch_result.confidence})")
@@ -86,38 +67,52 @@ def process_issue(
             retry_context.append({"diff": "", "error": f"Generation failed: {e}"})
             continue
 
-        if dry_run:
-            try:
-                edits = json.loads(patch_result.diff)
-                files = [e.get("filepath", "") for e in edits]
-            except json.JSONDecodeError:
-                files = []
-            if generated_test:
-                test_result = build_test_result(
-                    issue, generated_test,
-                    pre_fix_passed=False, pre_fix_output="(dry run)",
-                    post_fix_passed=False, post_fix_output="(dry run)",
-                )
-            return IssueFixResult(
-                issue_id=issue.id, title=issue.title,
-                status="fixed", confidence=patch_result.confidence,
-                files_changed=files, test_result=test_result,
-            )
-
-        applied, apply_error = _apply_file_edits(patch_result.diff, github.repo_path)
-        if not applied:
-            logger.error(f"[PROCESSOR] ✗ Apply failed: {apply_error}")
-            retry_context.append({"diff": patch_result.diff, "error": apply_error})
-            continue
-
         try:
             edits = json.loads(patch_result.diff)
             files = [e.get("filepath", "") for e in edits]
         except json.JSONDecodeError:
             files = []
+
+        if dry_run:
+            return IssueFixResult(
+                issue_id=issue.id, title=issue.title,
+                status="fixed", confidence=patch_result.confidence,
+                files_changed=files,
+            )
+
+        # ── Step 2: Build test from fix data (deterministic) ──
+        generated_test = None
+        try:
+            generated_test = build_test_from_patch(issue.id, patch_result.diff)
+            write_test_file(generated_test, github.repo_path)
+        except Exception as e:
+            logger.warning(f"[PROCESSOR] Test build failed for #{issue.id}: {e} — proceeding without test")
+
+        # ── Step 3: Run pre-fix test (expect FAIL) ────────
+        pre_fix_passed = False
+        pre_fix_output = ""
+        if generated_test:
+            pre_fix_passed, pre_fix_output = run_issue_test(generated_test, github.repo_path)
+            if pre_fix_passed:
+                logger.warning(f"[PROCESSOR] Pre-fix test PASSED for #{issue.id} — original code already gone?")
+            else:
+                logger.info(f"[PROCESSOR] ✓ Pre-fix test FAILED for #{issue.id} — buggy code confirmed in source")
+
+        # ── Step 4: Apply fix ─────────────────────────────
+        applied, apply_error = _apply_file_edits(patch_result.diff, github.repo_path)
+        if not applied:
+            logger.error(f"[PROCESSOR] ✗ Apply failed: {apply_error}")
+            # Clean up test file if written
+            if generated_test:
+                test_path = os.path.join(github.repo_path, generated_test.test_file_path)
+                if os.path.isfile(test_path):
+                    os.remove(test_path)
+            retry_context.append({"diff": patch_result.diff, "error": apply_error})
+            continue
+
         logger.info(f"[PROCESSOR] ✓ Applied: {files}")
 
-        # ── Step D: Run post-fix test (expect PASS) ───────
+        # ── Step 5: Run post-fix test (expect PASS) ───────
         post_fix_passed = False
         post_fix_output = ""
         if generated_test:
@@ -129,7 +124,7 @@ def process_issue(
             )
 
             if post_fix_passed:
-                logger.info(f"[PROCESSOR] ✓ Post-fix test PASSED for #{issue.id} — fix verified!")
+                logger.info(f"[PROCESSOR] ✓ Post-fix test PASSED for #{issue.id} — fix VERIFIED!")
             else:
                 logger.warning(f"[PROCESSOR] ✗ Post-fix test FAILED for #{issue.id} — fix accepted as unverified")
 
