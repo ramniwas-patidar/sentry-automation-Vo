@@ -3,7 +3,7 @@
     "sentry_project": "aqualogica-dev",
     "github_repo": "/primathontech/aqualogica",
     "repo_path": "https://github.com/primathontech/aqualogica",
-    "base_branch": "sentry-testing-error-page",
+    "base_branch": "aqualogica-master",
     "jira_project_key": "SFR",
     "test_command": "",
     "max_retries": 3
