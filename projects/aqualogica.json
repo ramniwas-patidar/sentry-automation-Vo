@@ -1,0 +1,10 @@
+{
+    "sentry_org": "primathon-10",
+    "sentry_project": "aqualogica-dev",
+    "github_repo": "/primathontech/aqualogica",
+    "repo_path": "https://github.com/primathontech/aqualogica",
+    "base_branch": "sentry-testing-error-page",
+    "jira_project_key": "SFR",
+    "test_command": "",
+    "max_retries": 3
+}
