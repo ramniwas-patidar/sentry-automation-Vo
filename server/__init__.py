@@ -62,6 +62,26 @@ app = FastAPI(
     version="7.0.0",
 )
 
+# ── Security: block vulnerability scanners ────────────────
+BLOCKED_EXTENSIONS = (".php", ".env", ".git", ".asp", ".aspx", ".jsp", ".cgi")
+BLOCKED_PATHS = ("/containers/", "/vendor/", "/phpunit/", "/.well-known/", "/wp-")
+
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import Response
+
+
+class ScannerBlockMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        path = request.url.path.lower()
+        if any(path.endswith(ext) for ext in BLOCKED_EXTENSIONS) or \
+           any(blocked in path for blocked in BLOCKED_PATHS):
+            logger.warning(f"[SECURITY] Blocked scanner request: {request.client.host} → {path}")
+            return Response(status_code=404)
+        return await call_next(request)
+
+
+app.add_middleware(ScannerBlockMiddleware)
+
 # Per-repo locks — prevents concurrent runs on the same repo
 _repo_locks: dict[str, threading.Lock] = {}
 _lock_manager = threading.Lock()
