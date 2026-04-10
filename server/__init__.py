@@ -69,6 +69,62 @@ _lock_manager = threading.Lock()
 # Webhook debounce — tracks last trigger time per project
 _last_webhook_trigger: dict[str, float] = {}
 
+# Pending re-trigger — projects that got webhooks during cooldown
+_pending_projects: dict[str, "ProjectConfig"] = {}
+_pending_timers: dict[str, threading.Timer] = {}
+_pending_lock = threading.Lock()
+
+
+def _schedule_pending(slug: str, project: "ProjectConfig", delay: float):
+    """Schedule a pipeline run after the cooldown expires."""
+    with _pending_lock:
+        _pending_projects[slug] = project
+        # Don't schedule another timer if one is already ticking
+        if slug in _pending_timers and _pending_timers[slug].is_alive():
+            logger.info(f"[WEBHOOK] Pending timer already scheduled for '{slug}'")
+            return
+        timer = threading.Timer(delay, _trigger_pending, args=[slug])
+        timer.daemon = True
+        timer.start()
+        _pending_timers[slug] = timer
+        logger.info(f"[WEBHOOK] Scheduled pending re-trigger for '{slug}' in {int(delay)}s")
+
+
+def _trigger_pending(slug: str):
+    """Called by the timer — triggers the pipeline for a project that was debounced."""
+    with _pending_lock:
+        project = _pending_projects.pop(slug, None)
+        _pending_timers.pop(slug, None)
+
+    if not project:
+        return
+
+    # Update trigger time so the new run gets its own cooldown window
+    _last_webhook_trigger[slug] = time.time()
+
+    lock = _get_repo_lock(project.github_repo)
+    if lock.locked():
+        logger.info(f"[WEBHOOK] Pending re-trigger for '{slug}' skipped — pipeline already running")
+        return
+
+    logger.info(f"[WEBHOOK] Pending re-trigger: running pipeline for '{slug}' after cooldown expired")
+
+    def _run_in_background():
+        if not lock.acquire(blocking=False):
+            logger.warning(f"[WEBHOOK] Could not acquire lock for pending run of '{slug}'")
+            return
+        try:
+            req = PipelineRequest(project=project, query="is:unresolved")
+            result = _execute_pipeline(req)
+            logger.info(f"[WEBHOOK] Pending pipeline done for '{slug}': status={result.status}, fixed={result.issues_fixed}")
+        except Exception as e:
+            logger.exception(f"[WEBHOOK] Pending pipeline failed for '{slug}': {e}")
+        finally:
+            lock.release()
+
+    thread = threading.Thread(target=_run_in_background, daemon=True)
+    thread.start()
+
 
 def _get_repo_lock(repo_path: str) -> threading.Lock:
     with _lock_manager:
@@ -198,11 +254,17 @@ async def sentry_webhook(request: Request):
     cooldown = settings.WEBHOOK_COOLDOWN_SECONDS
 
     if now - last_trigger < cooldown:
-        remaining = int(cooldown - (now - last_trigger))
+        remaining_secs = cooldown - (now - last_trigger)
+        remaining = int(remaining_secs)
         logger.info(f"[WEBHOOK] Debounced: project '{sentry_project_slug}' triggered {int(now - last_trigger)}s ago (cooldown={cooldown}s, {remaining}s remaining)")
+
+        # Queue a re-trigger after cooldown expires
+        _schedule_pending(sentry_project_slug, project, remaining_secs)
+
         return {
             "status": "debounced",
-            "reason": f"Pipeline was triggered {int(now - last_trigger)}s ago. Cooldown: {cooldown}s ({remaining}s remaining)",
+            "reason": f"Pipeline was triggered {int(now - last_trigger)}s ago. Cooldown: {cooldown}s ({remaining}s remaining). "
+                       f"Queued for auto-trigger in {remaining}s.",
         }
 
     _last_webhook_trigger[sentry_project_slug] = now
@@ -269,6 +331,7 @@ def webhook_status():
             "last_triggered_ago": f"{int(now - ts)}s",
             "cooldown_remaining": f"{max(0, int(cooldown - (now - ts)))}s",
             "ready": (now - ts) >= cooldown,
+            "pending_retrigger": project_slug in _pending_projects,
         }
         for project_slug, ts in _last_webhook_trigger.items()
     }
