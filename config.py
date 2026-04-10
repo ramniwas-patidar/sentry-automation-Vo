@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     SENTRY_CLIENT_SECRET: str = ""
 
     # Webhook settings
-    WEBHOOK_COOLDOWN_SECONDS: int = 300  # 5 min debounce per project
+    WEBHOOK_COOLDOWN_SECONDS: int = 30  # 30s debounce per project
     PROJECTS_DIR: str = "projects"  # directory containing project config JSONs
 
     # Logging
