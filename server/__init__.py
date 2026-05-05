@@ -337,6 +337,7 @@ def _execute_pipeline(req: PipelineRequest) -> PipelineResponse:
                 temp_clone_dir = github.clone_repo()
                 steps.append(StepResult(step="clone_repo", status="ok", detail=temp_clone_dir))
             except GitOperationError as e:
+                logger.error(f"[PIPELINE] ✗ Clone step failed: {e}")
                 steps.append(StepResult(step="clone_repo", status="failed", detail=str(e)))
                 return PipelineResponse(status="failed", error=f"Clone failed: {e}", steps=steps)
 
