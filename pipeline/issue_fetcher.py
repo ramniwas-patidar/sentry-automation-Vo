@@ -30,6 +30,11 @@ def fetch_all_issues(
     cursor = None
     page = 1
 
+    # TEST MODE: only fetch the first issue. Combined with limit=1 in
+    # SentryService.get_issues, this guarantees exactly one issue is processed
+    # per pipeline run. Remove this cap to restore full pagination.
+    TEST_MODE_FETCH_ONE = True
+
     while True:
         result = sentry.get_issues(query=query, cursor=cursor)
         if "error" in result:
@@ -38,6 +43,10 @@ def fetch_all_issues(
         page_issues = result.get("issues", [])
         issues.extend(page_issues)
         logger.info(f"[FETCHER] Page {page}: {len(page_issues)} issues (total so far: {len(issues)})")
+
+        if TEST_MODE_FETCH_ONE and issues:
+            logger.info("[FETCHER] TEST_MODE_FETCH_ONE: stopping after first issue")
+            break
 
         cursor = result.get("next_cursor")
         if not cursor or not page_issues:
