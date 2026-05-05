@@ -6,7 +6,8 @@ class ProjectConfig(BaseModel):
     """Per-project configuration — passed at runtime, not hardcoded."""
     # Sentry
     sentry_org: str
-    sentry_project: str
+    sentry_project: str  # project slug, e.g. "wellversed-prod"
+    sentry_project_id: Optional[str] = None  # numeric ID — used to match event_alert webhooks
     sentry_token: Optional[str] = None  # falls back to .env default
 
     # GitHub

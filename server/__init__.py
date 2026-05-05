@@ -3,6 +3,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import threading
 import time
 from logging.handlers import RotatingFileHandler
@@ -195,13 +196,21 @@ async def sentry_webhook(request: Request):
         issue_id = str(error_data.get("issue_id", error_data.get("id", "")))
         issue_title = error_data.get("title", error_data.get("message", ""))
     elif resource == "event_alert":
-        # Alert rule webhook — data.event carries the offending event
+        # Alert rule webhook — data.event carries the offending event.
+        # `project` here is the numeric project ID, not a slug. Try to
+        # extract the slug from the event URL; otherwise pass the numeric ID
+        # and let the project lookup match by id.
         event_data = payload.get("data", {}).get("event", {})
-        sentry_project_slug = (
-            event_data.get("project_slug")
-            or event_data.get("project")
-            or ""
-        )
+        sentry_project_slug = event_data.get("project_slug", "") or ""
+        if not sentry_project_slug:
+            for url_field in ("url", "web_url", "issue_url"):
+                url = event_data.get(url_field, "") or ""
+                m = re.search(r"/(?:organizations/[^/]+/projects|projects/[^/]+)/([^/?#]+)", url)
+                if m:
+                    sentry_project_slug = m.group(1)
+                    break
+        if not sentry_project_slug:
+            sentry_project_slug = str(event_data.get("project", ""))
         issue_id = str(event_data.get("issue_id", event_data.get("event_id", "")))
         issue_title = event_data.get("title") or event_data.get("message", "")
     else:
