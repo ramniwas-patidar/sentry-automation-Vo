@@ -174,20 +174,36 @@ async def sentry_webhook(request: Request):
 
     logger.info(f"[WEBHOOK] Received: resource={resource}, action={action}")
 
-    # Only process issue.created and error.created events
-    allowed_events = {("issue", "created"), ("error", "created")}
+    # Accepted webhook events:
+    #   issue.created       — new Sentry issue (first occurrence)
+    #   error.created       — new error event
+    #   event_alert.triggered — Alert Rule fired (covers repeat occurrences of existing issues)
+    allowed_events = {
+        ("issue", "created"),
+        ("error", "created"),
+        ("event_alert", "triggered"),
+    }
     if (resource, action) not in allowed_events:
         logger.info(f"[WEBHOOK] Ignoring: resource={resource}, action={action}")
-        return {"status": "ignored", "reason": f"Only issue.created and error.created events are processed (got {resource}.{action})"}
+        return {"status": "ignored", "reason": f"Unhandled event {resource}.{action}"}
 
-    # Step 3: Extract project info from payload
-    # error.created payload nests data under "data.error", issue.created under "data.issue"
+    # Step 3: Extract project + issue info — payload shape varies by resource
     if resource == "error":
         error_data = payload.get("data", {}).get("error", {})
         project_data = error_data.get("project", payload.get("data", {}).get("project", {}))
         sentry_project_slug = project_data.get("slug", "")
         issue_id = str(error_data.get("issue_id", error_data.get("id", "")))
         issue_title = error_data.get("title", error_data.get("message", ""))
+    elif resource == "event_alert":
+        # Alert rule webhook — data.event carries the offending event
+        event_data = payload.get("data", {}).get("event", {})
+        sentry_project_slug = (
+            event_data.get("project_slug")
+            or event_data.get("project")
+            or ""
+        )
+        issue_id = str(event_data.get("issue_id", event_data.get("event_id", "")))
+        issue_title = event_data.get("title") or event_data.get("message", "")
     else:
         issue_data = payload.get("data", {}).get("issue", {})
         project_data = issue_data.get("project", {})
