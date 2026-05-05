@@ -1,8 +1,8 @@
 {
   "sentry_org": "primathon-10",
   "sentry_project": "wellversed-prod",
-  "github_repo": "/primathontech/wellversed",
-  "repo_path": "https://github.com/primathontech/wellversed",
+  "sentry_project_id": "4510900739112960",
+  "github_repo": "primathontech/wellversed",
   "base_branch": "wellversed-master",
   "jira_project_key": "CSPI",
   "test_command": "",
