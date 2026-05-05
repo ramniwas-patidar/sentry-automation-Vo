@@ -32,7 +32,7 @@ class SentryService:
 
     def get_issues(self, query: str = "is:unresolved", cursor: str = None) -> dict:
         try:
-            params = {"query": f"project:{self.project} {query}"}
+            params = {"query": f"project:{self.project} {query}", "limit": 1}
             if cursor:
                 params["cursor"] = cursor
 

@@ -1,12 +1,20 @@
 import json
 import logging
 import os
+from typing import Optional
 
 from models.schemas import IssueFixResult, PatchResult, SentryIssue
 from services.github_service import GitHubService
 from services.llm_service import get_llm
 from pipeline.test_generator import (
-    build_test_from_patch, write_test_file, run_issue_test, build_test_result,
+    BehavioralRun,
+    build_behavioral_test,
+    build_test_from_patch,
+    build_test_result,
+    is_test_setup_error,
+    repair_behavioral_test,
+    run_issue_test,
+    write_test_file,
 )
 
 logger = logging.getLogger(__name__)
@@ -80,53 +88,111 @@ def process_issue(
                 files_changed=files,
             )
 
-        # ── Step 2: Build test from fix data (deterministic) ──
+        # ── Step 2: Build deterministic test from fix data ──
         generated_test = None
         try:
             generated_test = build_test_from_patch(issue.id, patch_result.diff)
             write_test_file(generated_test, github.repo_path)
         except Exception as e:
-            logger.warning(f"[PROCESSOR] Test build failed for #{issue.id}: {e} — proceeding without test")
+            logger.warning(f"[PROCESSOR] Det test build failed for #{issue.id}: {e} — proceeding without")
 
-        # ── Step 3: Run pre-fix test (expect FAIL) ────────
+        # ── Step 3: Build behavioral test (LLM, before fix is applied) ──
+        beh_test = None
+        try:
+            source_context = _get_source_context(issue, github)
+            beh_test = build_behavioral_test(issue, patch_result.diff, source_context)
+            if beh_test:
+                write_test_file(beh_test, github.repo_path)
+        except Exception as e:
+            logger.warning(f"[PROCESSOR] Behavioral test gen failed for #{issue.id}: {e} — proceeding without")
+
+        # ── Step 4: Run pre-fix tests (expect FAIL on both) ──
         pre_fix_passed = False
         pre_fix_output = ""
         if generated_test:
             pre_fix_passed, pre_fix_output = run_issue_test(generated_test, github.repo_path)
-            if pre_fix_passed:
-                logger.warning(f"[PROCESSOR] Pre-fix test PASSED for #{issue.id} — original code already gone?")
-            else:
-                logger.info(f"[PROCESSOR] ✓ Pre-fix test FAILED for #{issue.id} — buggy code confirmed in source")
+            logger.info(f"[PROCESSOR] Det pre-fix: {'PASS' if pre_fix_passed else 'FAIL'} (FAIL is expected)")
 
-        # ── Step 4: Apply fix ─────────────────────────────
+        beh_pre_passed = False
+        beh_pre_output = ""
+        if beh_test:
+            beh_pre_passed, beh_pre_output = run_issue_test(beh_test, github.repo_path)
+            logger.info(f"[PROCESSOR] Beh pre-fix: {'PASS' if beh_pre_passed else 'FAIL'} (FAIL is expected)")
+
+        # ── Step 5: Apply fix ─────────────────────────────
         applied, apply_error = _apply_file_edits(patch_result.diff, github.repo_path)
         if not applied:
             logger.error(f"[PROCESSOR] ✗ Apply failed: {apply_error}")
-            # Clean up test file if written
-            if generated_test:
-                test_path = os.path.join(github.repo_path, generated_test.test_file_path)
-                if os.path.isfile(test_path):
-                    os.remove(test_path)
+            for t in (generated_test, beh_test):
+                if t:
+                    test_path = os.path.join(github.repo_path, t.test_file_path)
+                    if os.path.isfile(test_path):
+                        os.remove(test_path)
             retry_context.append({"diff": patch_result.diff, "error": apply_error})
             continue
 
         logger.info(f"[PROCESSOR] ✓ Applied: {files}")
 
-        # ── Step 5: Run post-fix test (expect PASS) ───────
+        # ── Step 6: Run post-fix tests (expect PASS on both) ──
         post_fix_passed = False
         post_fix_output = ""
         if generated_test:
             post_fix_passed, post_fix_output = run_issue_test(generated_test, github.repo_path)
+            logger.info(f"[PROCESSOR] Det post-fix: {'PASS' if post_fix_passed else 'FAIL'}")
+
+        beh_post_passed = False
+        beh_post_output = ""
+        repair_attempts = 0
+        if beh_test:
+            beh_post_passed, beh_post_output = run_issue_test(beh_test, github.repo_path)
+            logger.info(f"[PROCESSOR] Beh post-fix: {'PASS' if beh_post_passed else 'FAIL'}")
+
+            # Repair loop: only on test setup/compile errors, max 2 attempts
+            while (
+                repair_attempts < 2
+                and not beh_post_passed
+                and is_test_setup_error(beh_post_output)
+            ):
+                repair_attempts += 1
+                logger.info(f"[PROCESSOR] Behavioral test setup error, repair attempt {repair_attempts}/2")
+                repaired = repair_behavioral_test(beh_test, beh_post_output)
+                if not repaired:
+                    break
+                beh_test = repaired
+                write_test_file(beh_test, github.repo_path)
+                beh_post_passed, beh_post_output = run_issue_test(beh_test, github.repo_path)
+                logger.info(f"[PROCESSOR] Beh post-fix (after repair {repair_attempts}): {'PASS' if beh_post_passed else 'FAIL'}")
+
+            # If we repaired, re-run pre-fix with the repaired test for an accurate verdict
+            if repair_attempts > 0:
+                rerun = _safely_rerun_behavioral_pre_fix(
+                    beh_test, patch_result.diff, github.repo_path,
+                )
+                if rerun is not None:
+                    beh_pre_passed, beh_pre_output = rerun
+                    logger.info(f"[PROCESSOR] Beh pre-fix (repaired test): {'PASS' if beh_pre_passed else 'FAIL'}")
+
+        if generated_test:
             test_result = build_test_result(
                 issue, generated_test,
                 pre_fix_passed, pre_fix_output,
                 post_fix_passed, post_fix_output,
+                behavioral=BehavioralRun(
+                    test=beh_test,
+                    pre_fix_passed=beh_pre_passed,
+                    pre_fix_output=beh_pre_output,
+                    post_fix_passed=beh_post_passed,
+                    post_fix_output=beh_post_output,
+                    repair_attempts=repair_attempts,
+                ) if beh_test else None,
             )
 
-            if post_fix_passed:
-                logger.info(f"[PROCESSOR] ✓ Post-fix test PASSED for #{issue.id} — fix VERIFIED!")
+            if test_result.verified:
+                logger.info(f"[PROCESSOR] ✓ Behavioral VERIFIED for #{issue.id}")
+            elif test_result.deterministic_verified:
+                logger.info(f"[PROCESSOR] ~ Deterministic verified, behavioral unverified for #{issue.id}")
             else:
-                logger.warning(f"[PROCESSOR] ✗ Post-fix test FAILED for #{issue.id} — fix accepted as unverified")
+                logger.warning(f"[PROCESSOR] ✗ Unverified for #{issue.id}, fix accepted")
 
         return IssueFixResult(
             issue_id=issue.id, title=issue.title,
@@ -212,6 +278,36 @@ def _apply_file_edits(edits_json: str, repo_path: str) -> tuple[bool, str]:
 
     logger.info(f"[PROCESSOR] All {len(edits)} edit(s) applied")
     return True, ""
+
+
+def _safely_rerun_behavioral_pre_fix(
+    beh_test,
+    edits_json: str,
+    repo_path: str,
+) -> Optional[tuple]:
+    """Revert source, run behavioral test, re-apply source. Returns (passed, output) or None.
+
+    Used after the test was repaired post-fix — the original pre-fix output was
+    against an unrepaired test, so the verdict isn't comparable. We need to run
+    the repaired test against the buggy source to know if it actually reproduces
+    the bug.
+    """
+    try:
+        _revert_file_edits(edits_json, repo_path)
+    except Exception as e:
+        logger.warning(f"[PROCESSOR] Pre-fix re-run: revert failed ({e}) — keeping original verdict")
+        return None
+
+    try:
+        result = run_issue_test(beh_test, repo_path)
+    finally:
+        # Always re-apply, even if the run errored, to leave the repo in a
+        # consistent post-fix state.
+        applied, err = _apply_file_edits(edits_json, repo_path)
+        if not applied:
+            logger.error(f"[PROCESSOR] Pre-fix re-run: re-apply FAILED ({err}) — repo state may be inconsistent")
+
+    return result
 
 
 def _revert_file_edits(edits_json: str, repo_path: str) -> None:

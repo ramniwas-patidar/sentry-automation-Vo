@@ -76,15 +76,39 @@ class FilteredIssue(BaseModel):
 
 
 class TestResult(BaseModel):
-    """Result of TDD verification for a single issue."""
+    """Result of TDD verification for a single issue.
+
+    Two layers run for every fix:
+    - Deterministic: file-content substring check, always-on safety net.
+    - Behavioral: LLM-generated Jest+RTL test that exercises the user flow.
+
+    `verified` reflects ONLY the behavioral layer per spec: True iff behavioral
+    pre-fix fails (bug reproduced) and behavioral post-fix passes.
+    """
     issue_id: str
-    test_file: str
+
+    # Deterministic layer (file-content substring check)
+    test_file: str = ""
     test_description: str = ""
-    pre_fix_passed: bool = False       # Should be False (bug exists)
+    pre_fix_passed: bool = False
     pre_fix_output: str = ""
-    post_fix_passed: bool = False      # Should be True (fix works)
+    post_fix_passed: bool = False
     post_fix_output: str = ""
-    verified: bool = False             # True only if pre=FAIL and post=PASS
+    deterministic_verified: bool = False
+
+    # Behavioral layer (LLM-generated, real test execution)
+    behavioral_test_file: Optional[str] = None
+    behavioral_test_code: Optional[str] = None
+    behavioral_test_description: Optional[str] = None
+    behavioral_pre_fix_passed: bool = False
+    behavioral_pre_fix_output: str = ""
+    behavioral_post_fix_passed: bool = False
+    behavioral_post_fix_output: str = ""
+    behavioral_repair_attempts: int = 0
+    behavioral_verified: bool = False
+
+    # Headline verdict (mirrors behavioral_verified per spec)
+    verified: bool = False
 
 
 class IssueFixResult(BaseModel):
