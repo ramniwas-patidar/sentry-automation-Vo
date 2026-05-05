@@ -44,18 +44,45 @@ def build_pr_content(
             f"  - [View in Sentry]({link})"
         )
 
-    # Test verification results
+    # Test verification results — two layers per fix
     tested = [r for r in fixed if r.test_result]
     if tested:
         body.append("\n## Test Verification")
+        body.append("Two layers run for every fix: a deterministic file-content check (always-on safety net) and an LLM-generated behavioral Jest+RTL test that exercises the user flow. `verified` reflects the behavioral layer.")
+
+        body.append("\n### Deterministic layer (file-content check)")
         body.append("| Issue | Test File | Pre-Fix | Post-Fix | Status |")
         body.append("|-------|-----------|---------|----------|--------|")
         for r in tested:
             tr = r.test_result
             pre = "FAIL" if not tr.pre_fix_passed else "PASS"
             post = "PASS" if tr.post_fix_passed else "FAIL"
-            status = "Verified" if tr.verified else "Unverified"
+            status = "Verified" if tr.deterministic_verified else "Unverified"
             body.append(f"| #{r.issue_id} | `{tr.test_file}` | {pre} | {post} | {status} |")
+
+        behavioral = [r for r in tested if r.test_result.behavioral_test_file]
+        if behavioral:
+            body.append("\n### Behavioral layer (LLM-generated, runs the user flow)")
+            body.append("| Issue | Test File | Pre-Fix | Post-Fix | Repairs | Status |")
+            body.append("|-------|-----------|---------|----------|---------|--------|")
+            for r in behavioral:
+                tr = r.test_result
+                pre = "FAIL" if not tr.behavioral_pre_fix_passed else "PASS"
+                post = "PASS" if tr.behavioral_post_fix_passed else "FAIL"
+                status = "Verified" if tr.behavioral_verified else "Unverified"
+                body.append(
+                    f"| #{r.issue_id} | `{tr.behavioral_test_file}` | {pre} | {post} | "
+                    f"{tr.behavioral_repair_attempts} | {status} |"
+                )
+
+            for r in behavioral:
+                tr = r.test_result
+                desc = tr.behavioral_test_description or "(no description)"
+                body.append(f"\n<details><summary>Behavioral test for #{r.issue_id} — {desc}</summary>\n")
+                body.append(f"\n```js\n{tr.behavioral_test_code}\n```\n")
+                if tr.behavioral_post_fix_output and not tr.behavioral_post_fix_passed:
+                    body.append(f"\n**Post-fix output (last 500 chars):**\n```\n{tr.behavioral_post_fix_output}\n```\n")
+                body.append("</details>")
 
     if filtered:
         body.append("\n## Filtered Issues (resolved in Sentry)")
