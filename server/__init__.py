@@ -3,6 +3,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import threading
 import time
 from logging.handlers import RotatingFileHandler
@@ -61,6 +62,26 @@ app = FastAPI(
     description="Automated bug-fixing pipeline: Sentry → Filter → OpenAI → Git → GitHub PR → Jira",
     version="7.0.0",
 )
+
+# ── Security: block vulnerability scanners ────────────────
+BLOCKED_EXTENSIONS = (".php", ".env", ".git", ".asp", ".aspx", ".jsp", ".cgi")
+BLOCKED_PATHS = ("/containers/", "/vendor/", "/phpunit/", "/.well-known/", "/wp-")
+
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import Response
+
+
+class ScannerBlockMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        path = request.url.path.lower()
+        if any(path.endswith(ext) for ext in BLOCKED_EXTENSIONS) or \
+           any(blocked in path for blocked in BLOCKED_PATHS):
+            logger.warning(f"[SECURITY] Blocked scanner request: {request.client.host} → {path}")
+            return Response(status_code=404)
+        return await call_next(request)
+
+
+app.add_middleware(ScannerBlockMiddleware)
 
 # Per-repo locks — prevents concurrent runs on the same repo
 _repo_locks: dict[str, threading.Lock] = {}
@@ -154,20 +175,44 @@ async def sentry_webhook(request: Request):
 
     logger.info(f"[WEBHOOK] Received: resource={resource}, action={action}")
 
-    # Only process issue.created and error.created events
-    allowed_events = {("issue", "created"), ("error", "created")}
+    # Accepted webhook events:
+    #   issue.created       — new Sentry issue (first occurrence)
+    #   error.created       — new error event
+    #   event_alert.triggered — Alert Rule fired (covers repeat occurrences of existing issues)
+    allowed_events = {
+        ("issue", "created"),
+        ("error", "created"),
+        ("event_alert", "triggered"),
+    }
     if (resource, action) not in allowed_events:
         logger.info(f"[WEBHOOK] Ignoring: resource={resource}, action={action}")
-        return {"status": "ignored", "reason": f"Only issue.created and error.created events are processed (got {resource}.{action})"}
+        return {"status": "ignored", "reason": f"Unhandled event {resource}.{action}"}
 
-    # Step 3: Extract project info from payload
-    # error.created payload nests data under "data.error", issue.created under "data.issue"
+    # Step 3: Extract project + issue info — payload shape varies by resource
     if resource == "error":
         error_data = payload.get("data", {}).get("error", {})
         project_data = error_data.get("project", payload.get("data", {}).get("project", {}))
         sentry_project_slug = project_data.get("slug", "")
         issue_id = str(error_data.get("issue_id", error_data.get("id", "")))
         issue_title = error_data.get("title", error_data.get("message", ""))
+    elif resource == "event_alert":
+        # Alert rule webhook — data.event carries the offending event.
+        # `project` here is the numeric project ID, not a slug. Try to
+        # extract the slug from the event URL; otherwise pass the numeric ID
+        # and let the project lookup match by id.
+        event_data = payload.get("data", {}).get("event", {})
+        sentry_project_slug = event_data.get("project_slug", "") or ""
+        if not sentry_project_slug:
+            for url_field in ("url", "web_url", "issue_url"):
+                url = event_data.get(url_field, "") or ""
+                m = re.search(r"/(?:organizations/[^/]+/projects|projects/[^/]+)/([^/?#]+)", url)
+                if m:
+                    sentry_project_slug = m.group(1)
+                    break
+        if not sentry_project_slug:
+            sentry_project_slug = str(event_data.get("project", ""))
+        issue_id = str(event_data.get("issue_id", event_data.get("event_id", "")))
+        issue_title = event_data.get("title") or event_data.get("message", "")
     else:
         issue_data = payload.get("data", {}).get("issue", {})
         project_data = issue_data.get("project", {})
@@ -202,7 +247,7 @@ async def sentry_webhook(request: Request):
         logger.info(f"[WEBHOOK] Debounced: project '{sentry_project_slug}' triggered {int(now - last_trigger)}s ago (cooldown={cooldown}s, {remaining}s remaining)")
         return {
             "status": "debounced",
-            "reason": f"Pipeline was triggered {int(now - last_trigger)}s ago. Cooldown: {cooldown}s ({remaining}s remaining)",
+            "reason": f"Pipeline was triggered {int(now - last_trigger)}s ago. Cooldown: {cooldown}s ({remaining}s remaining). Next run requires another webhook after the cooldown.",
         }
 
     _last_webhook_trigger[sentry_project_slug] = now
@@ -269,6 +314,7 @@ def webhook_status():
             "last_triggered_ago": f"{int(now - ts)}s",
             "cooldown_remaining": f"{max(0, int(cooldown - (now - ts)))}s",
             "ready": (now - ts) >= cooldown,
+            "pending_retrigger": project_slug in _pending_projects,
         }
         for project_slug, ts in _last_webhook_trigger.items()
     }
@@ -291,6 +337,7 @@ def _execute_pipeline(req: PipelineRequest) -> PipelineResponse:
                 temp_clone_dir = github.clone_repo()
                 steps.append(StepResult(step="clone_repo", status="ok", detail=temp_clone_dir))
             except GitOperationError as e:
+                logger.error(f"[PIPELINE] ✗ Clone step failed: {e}")
                 steps.append(StepResult(step="clone_repo", status="failed", detail=str(e)))
                 return PipelineResponse(status="failed", error=f"Clone failed: {e}", steps=steps)
 

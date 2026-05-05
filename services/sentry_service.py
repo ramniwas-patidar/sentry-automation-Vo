@@ -1,8 +1,15 @@
 import logging
+import re
 
 import requests
 
 logger = logging.getLogger(__name__)
+
+# Sentry Link header pagination — match each link entry and pull cursor + flags.
+# Example: <https://...?cursor=1777544555000:0:0>; rel="next"; results="true"
+_LINK_ENTRY_RE = re.compile(
+    r'<[^>]*[?&]cursor=(?P<cursor>[^>&]+)[^>]*>;\s*rel="(?P<rel>[^"]+)";\s*results="(?P<results>[^"]+)"'
+)
 
 
 class SentryService:
@@ -49,11 +56,10 @@ class SentryService:
             issues = response.json()
             next_cursor = None
             link_header = response.headers.get("Link", "")
-            if 'rel="next"; results="true"' in link_header:
-                for part in link_header.split(","):
-                    if 'rel="next"' in part and 'results="true"' in part:
-                        next_cursor = part.split("cursor=")[1].split("&")[0].strip('">')
-                        break
+            for match in _LINK_ENTRY_RE.finditer(link_header):
+                if match.group("rel") == "next" and match.group("results") == "true":
+                    next_cursor = match.group("cursor")
+                    break
 
             return {
                 "issues": [

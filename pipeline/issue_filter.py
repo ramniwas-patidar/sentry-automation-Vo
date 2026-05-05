@@ -51,6 +51,22 @@ def filter_issues(
     if not issues:
         return [], [], []
 
+    # TEST MODE: skip LLM filtering, treat every issue as relevant.
+    # Flip to False to restore third-party / hydration / infra filtering.
+    DISABLE_FILTER = True
+
+    if DISABLE_FILTER:
+        logger.info(f"[FILTER] DISABLED — passing through all {len(issues)} issue(s) as relevant")
+        results = [
+            FilteredIssue(
+                issue_id=i.id, title=i.title,
+                is_relevant=True, reason="filter disabled",
+                category="application_bug",
+            )
+            for i in issues
+        ]
+        return list(issues), [], results
+
     logger.info(f"[FILTER] ── LLM Issue Filtering ──")
     logger.info(f"[FILTER] Filtering {len(issues)} issues...")
 

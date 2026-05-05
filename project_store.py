@@ -35,10 +35,20 @@ def load_all_projects(projects_dir: str = "projects") -> list[ProjectConfig]:
 
 
 def find_project_by_sentry_slug(sentry_project: str, projects_dir: str = "projects") -> Optional[ProjectConfig]:
-    """Find a project config by Sentry project slug."""
+    """Find a project config by Sentry project slug or numeric ID.
+
+    Sentry webhooks use different identifiers per resource:
+      - issue.created / error.created → slug (e.g. "wellversed-prod")
+      - event_alert.triggered → numeric ID (e.g. "4510900739112960")
+    Match either field so a single lookup works for all webhook types.
+    """
+    if not sentry_project:
+        return None
     configs = load_all_projects(projects_dir)
     for config in configs:
         if config.sentry_project == sentry_project:
+            return config
+        if config.sentry_project_id and config.sentry_project_id == sentry_project:
             return config
     return None
 
