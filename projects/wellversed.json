@@ -1,6 +1,6 @@
 {
   "sentry_org": "primathon-10",
-  "sentry_project": "wellversed-dev",
+  "sentry_project": "wellversed-prod",
   "github_repo": "/primathontech/wellversed",
   "repo_path": "https://github.com/primathontech/wellversed",
   "base_branch": "wellversed-master",
