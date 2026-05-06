@@ -49,8 +49,8 @@ from project_store import find_project_by_sentry_slug, load_all_projects
 from services.sentry_service import SentryService
 from services.github_service import GitHubService, GitOperationError
 from services.jira_service import JiraService
+from services import automation_state
 from pipeline.issue_fetcher import fetch_all_issues
-from pipeline.issue_filter import filter_issues
 from pipeline.issue_processor import process_issue
 from pipeline.pr_creator import commit_push_and_create_pr
 from pipeline.jira_creator import create_jira_tickets
@@ -59,7 +59,7 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="Sentry Automation API",
-    description="Automated bug-fixing pipeline: Sentry → Filter → OpenAI → Git → GitHub PR → Jira",
+    description="Automated bug-fixing pipeline: Sentry → OpenAI → Git → GitHub PR → Jira",
     version="7.0.0",
 )
 
@@ -127,7 +127,7 @@ def build_services(project: ProjectConfig) -> tuple[SentryService, GitHubService
 
 @app.post("/pipeline/run", response_model=PipelineResponse)
 def run_pipeline(req: PipelineRequest):
-    """Run the full pipeline: fetch → filter → fix → test → PR → Jira."""
+    """Run the full pipeline: fetch → fix → test → PR → Jira."""
     lock = _get_repo_lock(req.project.github_repo)
     if not lock.acquire(blocking=False):
         raise HTTPException(status_code=409, detail="A pipeline run is already in progress for this repo")
@@ -176,56 +176,42 @@ async def sentry_webhook(request: Request):
     logger.info(f"[WEBHOOK] Received: resource={resource}, action={action}")
 
     # Accepted webhook events:
-    #   issue.created       — new Sentry issue (first occurrence)
-    #   error.created       — new error event
-    #   event_alert.triggered — Alert Rule fired (covers repeat occurrences of existing issues)
+    #   issue.created    — first-ever occurrence of a new issue
+    #   issue.unresolved — old issue regressed (was resolved, came back)
+    #   error.created   — every error event for an existing issue (firehose)
     allowed_events = {
         ("issue", "created"),
+        ("issue", "unresolved"),
         ("error", "created"),
-        ("event_alert", "triggered"),
     }
     if (resource, action) not in allowed_events:
         logger.info(f"[WEBHOOK] Ignoring: resource={resource}, action={action}")
         return {"status": "ignored", "reason": f"Unhandled event {resource}.{action}"}
 
-    # Step 3: Extract project + issue info — payload shape varies by resource
-    if resource == "error":
-        error_data = payload.get("data", {}).get("error", {})
-        project_data = error_data.get("project", payload.get("data", {}).get("project", {}))
-        sentry_project_slug = project_data.get("slug", "")
-        issue_id = str(error_data.get("issue_id", error_data.get("id", "")))
-        issue_title = error_data.get("title", error_data.get("message", ""))
-    elif resource == "event_alert":
-        # Alert rule webhook — data.event carries the offending event.
-        # `project` here is the numeric project ID, not a slug. Try to
-        # extract the slug from the event URL; otherwise pass the numeric ID
-        # and let the project lookup match by id.
-        event_data = payload.get("data", {}).get("event", {})
-        sentry_project_slug = event_data.get("project_slug", "") or ""
-        if not sentry_project_slug:
-            for url_field in ("url", "web_url", "issue_url"):
-                url = event_data.get(url_field, "") or ""
-                m = re.search(r"/(?:organizations/[^/]+/projects|projects/[^/]+)/([^/?#]+)", url)
-                if m:
-                    sentry_project_slug = m.group(1)
-                    break
-        if not sentry_project_slug:
-            sentry_project_slug = str(event_data.get("project", ""))
-        issue_id = str(event_data.get("issue_id", event_data.get("event_id", "")))
-        issue_title = event_data.get("title") or event_data.get("message", "")
-    else:
+    # Step 3: Strict per-resource extraction. issue_id MUST be the issue id
+    # (never an event id), or get_issue_details() will 404.
+    if resource == "issue":
         issue_data = payload.get("data", {}).get("issue", {})
         project_data = issue_data.get("project", {})
         sentry_project_slug = project_data.get("slug", "")
         issue_id = str(issue_data.get("id", ""))
         issue_title = issue_data.get("title", "")
+    else:  # resource == "error"
+        error_data = payload.get("data", {}).get("error", {})
+        project_data = error_data.get("project", payload.get("data", {}).get("project", {}))
+        sentry_project_slug = project_data.get("slug", "")
+        issue_id = str(error_data.get("issue_id", ""))   # never fall back to id (event_id)
+        issue_title = error_data.get("title", error_data.get("message", ""))
 
-    logger.info(f"[WEBHOOK] New {resource}: #{issue_id} in project '{sentry_project_slug}'")
+    logger.info(f"[WEBHOOK] {resource}.{action}: issue=#{issue_id} project='{sentry_project_slug}'")
     logger.info(f"[WEBHOOK] Title: {issue_title[:100]}")
 
     if not sentry_project_slug:
         logger.warning("[WEBHOOK] No project slug in payload")
         raise HTTPException(status_code=400, detail="Missing project slug in webhook payload")
+    if not issue_id:
+        logger.warning("[WEBHOOK] No issue_id in payload")
+        raise HTTPException(status_code=400, detail="Missing issue_id in webhook payload")
 
     # Step 4: Look up project config
     project = find_project_by_sentry_slug(sentry_project_slug, settings.PROJECTS_DIR)
@@ -237,36 +223,75 @@ async def sentry_webhook(request: Request):
                        f"Create a JSON file in {settings.PROJECTS_DIR}/ with sentry_project='{sentry_project_slug}'",
         }
 
-    # Step 5: Debounce — skip if recently triggered
+    sentry, _, _ = build_services(project)
+
+    # Step 5: Regression — write a fresh 'regression' comment that supersedes any
+    # prior 'fixed' state, then clear our cache. The comment-state check below
+    # will see the new newest comment and decide_action returns 'process'.
+    if action == "unresolved":
+        automation_state.cache_clear(sentry_project_slug, issue_id)
+        try:
+            automation_state.write_state(sentry, issue_id, "regression")
+        except Exception as e:
+            logger.warning(f"[WEBHOOK] could not write regression marker for #{issue_id}: {e}")
+        logger.info(f"[WEBHOOK] issue.unresolved → reset state for #{issue_id} (regression)")
+
+    # Step 6: Comment-based dedup. Fast path: in-memory cache.
+    if automation_state.cached_terminal(sentry_project_slug, issue_id) == "fixed":
+        logger.info(f"[WEBHOOK] Skip #{issue_id}: cached state=fixed")
+        return {"status": "skipped", "reason": "already fixed (cache)"}
+
+    # Slow path: ask Sentry for the latest state comment.
+    state = automation_state.get_latest_state(sentry, issue_id)
+    decision = automation_state.decide_action(state)
+    if decision == "skip":
+        if state and state.name == "fixed":
+            automation_state.cache_set(sentry_project_slug, issue_id, "fixed")
+        logger.info(f"[WEBHOOK] Skip #{issue_id}: state={state.name if state else 'none'}")
+        return {
+            "status": "skipped",
+            "reason": f"sentry comment state={state.name}",
+            "pr_url": state.pr if state else None,
+        }
+
+    # Step 7: Per-issue debounce (so two different bugs don't suppress each other).
+    debounce_key = f"{sentry_project_slug}:{issue_id}"
     now = time.time()
-    last_trigger = _last_webhook_trigger.get(sentry_project_slug, 0)
+    last_trigger = _last_webhook_trigger.get(debounce_key, 0)
     cooldown = settings.WEBHOOK_COOLDOWN_SECONDS
 
     if now - last_trigger < cooldown:
         remaining = int(cooldown - (now - last_trigger))
-        logger.info(f"[WEBHOOK] Debounced: project '{sentry_project_slug}' triggered {int(now - last_trigger)}s ago (cooldown={cooldown}s, {remaining}s remaining)")
+        logger.info(f"[WEBHOOK] Debounced #{issue_id}: triggered {int(now - last_trigger)}s ago ({remaining}s remaining)")
         return {
             "status": "debounced",
-            "reason": f"Pipeline was triggered {int(now - last_trigger)}s ago. Cooldown: {cooldown}s ({remaining}s remaining). Next run requires another webhook after the cooldown.",
+            "reason": f"issue triggered {int(now - last_trigger)}s ago, cooldown {cooldown}s ({remaining}s remaining)",
         }
 
-    _last_webhook_trigger[sentry_project_slug] = now
+    _last_webhook_trigger[debounce_key] = now
 
-    # Step 6: Check if pipeline is already running for this repo
+    # Opportunistic prune: any entry older than 2× cooldown can never debounce
+    # again, so it is dead weight. Drop it. Keeps memory bounded by recent traffic.
+    expiry = now - (cooldown * 2)
+    stale_keys = [k for k, ts in _last_webhook_trigger.items() if ts <= expiry]
+    for k in stale_keys:
+        _last_webhook_trigger.pop(k, None)
+
+    # Step 8: Per-repo lock — git safety across concurrent issues in the same repo.
     lock = _get_repo_lock(project.github_repo)
     if lock.locked():
         logger.info(f"[WEBHOOK] Pipeline already running for '{sentry_project_slug}'")
         return {"status": "skipped", "reason": "Pipeline already in progress for this repo"}
 
-    # Step 7: Trigger pipeline in background thread
-    logger.info(f"[WEBHOOK] Triggering pipeline for '{sentry_project_slug}' in background...")
+    # Step 9: Trigger single-issue pipeline in background thread
+    logger.info(f"[WEBHOOK] Triggering pipeline for #{issue_id} in background...")
 
     def _run_in_background():
         if not lock.acquire(blocking=False):
             logger.warning(f"[WEBHOOK] Could not acquire lock for background run")
             return
         try:
-            req = PipelineRequest(project=project, query="is:unresolved")
+            req = PipelineRequest(project=project, query="is:unresolved", issue_id=issue_id)
             result = _execute_pipeline(req)
             logger.info(f"[WEBHOOK] Background pipeline done: status={result.status}, fixed={result.issues_fixed}")
         except Exception as e:
@@ -306,23 +331,69 @@ def list_projects():
 
 @app.get("/webhook/status")
 def webhook_status():
-    """Show webhook debounce status for all projects."""
+    """Show webhook debounce status, keyed by 'project_slug:issue_id'."""
     now = time.time()
     cooldown = settings.WEBHOOK_COOLDOWN_SECONDS
     return {
-        project_slug: {
+        key: {
             "last_triggered_ago": f"{int(now - ts)}s",
             "cooldown_remaining": f"{max(0, int(cooldown - (now - ts)))}s",
             "ready": (now - ts) >= cooldown,
-            "pending_retrigger": project_slug in _pending_projects,
         }
-        for project_slug, ts in _last_webhook_trigger.items()
+        for key, ts in _last_webhook_trigger.items()
     }
 
 
 # ── Pipeline execution ─────────────────────────────────
 
 def _execute_pipeline(req: PipelineRequest) -> PipelineResponse:
+    """Wrap the pipeline with comment-based state writes when an issue_id is set."""
+    if not req.issue_id:
+        # Manual /pipeline/run with no issue_id — run as-is, no state tracking.
+        return _execute_pipeline_core(req)
+
+    sentry, _, _ = build_services(req.project)
+    slug = req.project.sentry_project
+    issue_id = req.issue_id
+
+    # Mark in_progress before any work starts.
+    try:
+        automation_state.write_state(sentry, issue_id, "in_progress")
+        automation_state.cache_set(slug, issue_id, "in_progress")
+    except Exception as e:
+        logger.warning(f"[STATE] could not write in_progress for #{issue_id}: {e}")
+
+    resp: PipelineResponse
+    try:
+        resp = _execute_pipeline_core(req)
+    except Exception as e:
+        try:
+            automation_state.write_state(sentry, issue_id, "failed", reason="exception")
+            automation_state.cache_clear(slug, issue_id)
+        except Exception:
+            pass
+        raise
+
+    # Record terminal outcome.
+    try:
+        if resp.status in ("success", "partial") and resp.pr_url:
+            automation_state.write_state(
+                sentry, issue_id, "fixed",
+                pr=resp.pr_url,
+                jira=(resp.jira_tickets[0] if resp.jira_tickets else None),
+            )
+            automation_state.cache_set(slug, issue_id, "fixed")
+        else:
+            short_reason = (resp.error or resp.status)[:80] if (resp.error or resp.status) else "unknown"
+            automation_state.write_state(sentry, issue_id, "failed", reason=short_reason)
+            automation_state.cache_clear(slug, issue_id)
+    except Exception as e:
+        logger.warning(f"[STATE] could not write final state for #{issue_id}: {e}")
+
+    return resp
+
+
+def _execute_pipeline_core(req: PipelineRequest) -> PipelineResponse:
     steps: list[StepResult] = []
     issue_results: list[IssueFixResult] = []
     branch_name = None
@@ -358,55 +429,30 @@ def _execute_pipeline(req: PipelineRequest) -> PipelineResponse:
             steps.append(StepResult(step="fetch_issues", status="failed", detail=str(e)))
             return PipelineResponse(status="failed", error=str(e), steps=steps)
 
-        # ─── STEP 2: LLM filtering ──────────────────────
-        logger.info("[PIPELINE] Step 2: Filtering issues via LLM...")
-        relevant_issues, filtered_issues, filter_details = filter_issues(all_issues, sentry)
-        steps.append(StepResult(
-            step="llm_filter", status="ok",
-            detail=f"{len(relevant_issues)} relevant, {len(filtered_issues)} filtered",
-        ))
-
-        for issue in filtered_issues:
-            info = next((r for r in filter_details if r.issue_id == issue.id), None)
-            issue_results.append(IssueFixResult(
-                issue_id=issue.id, title=issue.title, status="filtered",
-                error=f"Filtered ({info.category if info else 'unknown'}): {info.reason if info else 'N/A'}",
-            ))
-
-        if not relevant_issues:
-            logger.info("[PIPELINE] No relevant issues — done")
-            return PipelineResponse(
-                status="success",
-                issues_total=len(all_issues),
-                issues_filtered=len(filtered_issues),
-                issue_results=issue_results, steps=steps,
-            )
-
-        # Apply max_issues limit (all issues were filtered, now cap for processing)
+        # Apply max_issues limit
         max_issues = req.project.max_issues
-        if len(relevant_issues) > max_issues:
-            logger.info(f"[PIPELINE] Capping {len(relevant_issues)} relevant issues to max_issues={max_issues}")
-            relevant_issues = relevant_issues[:max_issues]
+        if len(all_issues) > max_issues:
+            logger.info(f"[PIPELINE] Capping {len(all_issues)} issues to max_issues={max_issues}")
+            all_issues = all_issues[:max_issues]
 
-        # ─── STEP 3: Create branch ──────────────────────
+        # ─── STEP 2: Create branch ──────────────────────
         if not req.dry_run:
-            logger.info("[PIPELINE] Step 3: Creating git branch...")
+            logger.info("[PIPELINE] Step 2: Creating git branch...")
             try:
-                branch_name = github.prepare_branch(f"batch-{len(relevant_issues)}issues")
+                branch_name = github.prepare_branch(f"batch-{len(all_issues)}issues")
                 steps.append(StepResult(step="git_branch", status="ok", detail=branch_name))
             except GitOperationError as e:
                 steps.append(StepResult(step="git_branch", status="failed", detail=str(e)))
                 return PipelineResponse(
                     status="failed", error=str(e),
                     issues_total=len(all_issues),
-                    issues_filtered=len(filtered_issues),
                     issue_results=issue_results, steps=steps,
                 )
 
-        # ─── STEP 4: TDD fix each issue (test → fix → verify) ──
-        logger.info(f"[PIPELINE] Step 4: TDD fixing {len(relevant_issues)} issues (generate test → verify bug → fix → verify fix)...")
-        for idx, issue in enumerate(relevant_issues):
-            logger.info(f"[PIPELINE] Issue {idx+1}/{len(relevant_issues)}: #{issue.id}")
+        # ─── STEP 3: TDD fix each issue (test → fix → verify) ──
+        logger.info(f"[PIPELINE] Step 3: TDD fixing {len(all_issues)} issues (generate test → verify bug → fix → verify fix)...")
+        for idx, issue in enumerate(all_issues):
+            logger.info(f"[PIPELINE] Issue {idx+1}/{len(all_issues)}: #{issue.id}")
             fix_result = process_issue(
                 issue, github, dry_run=req.dry_run,
                 max_retries=req.project.max_retries,
@@ -432,7 +478,6 @@ def _execute_pipeline(req: PipelineRequest) -> PipelineResponse:
             return PipelineResponse(
                 status="failed",
                 issues_total=len(all_issues),
-                issues_filtered=len(filtered_issues),
                 issues_fixed=0, issues_failed=failed_count,
                 issue_results=issue_results,
                 error="No issues could be fixed", steps=steps,
@@ -442,13 +487,12 @@ def _execute_pipeline(req: PipelineRequest) -> PipelineResponse:
             return PipelineResponse(
                 status="dry_run",
                 issues_total=len(all_issues),
-                issues_filtered=len(filtered_issues),
                 issues_fixed=fixed_count, issues_failed=failed_count,
                 issue_results=issue_results, steps=steps,
             )
 
-        # ─── STEP 5: Run tests ──────────────────────────
-        logger.info("[PIPELINE] Step 5: Running tests...")
+        # ─── STEP 4: Run tests ──────────────────────────
+        logger.info("[PIPELINE] Step 4: Running tests...")
         tests_passed, test_output = github.run_tests()
         if not tests_passed:
             steps.append(StepResult(step="tests", status="failed", detail=test_output[:500]))
@@ -456,15 +500,14 @@ def _execute_pipeline(req: PipelineRequest) -> PipelineResponse:
             return PipelineResponse(
                 status="failed",
                 issues_total=len(all_issues),
-                issues_filtered=len(filtered_issues),
                 issues_fixed=fixed_count, issues_failed=failed_count,
                 issue_results=issue_results,
                 error=f"Tests failed: {test_output[:300]}", steps=steps,
             )
         steps.append(StepResult(step="tests", status="ok", detail=test_output[:200]))
 
-        # ─── STEP 6: Commit + Push + PR ─────────────────
-        logger.info("[PIPELINE] Step 6: Creating PR...")
+        # ─── STEP 5: Commit + Push + PR ─────────────────
+        logger.info("[PIPELINE] Step 5: Creating PR...")
         pr_url = None
         try:
             pr_url = commit_push_and_create_pr(github, branch_name, issue_results, all_issues)
@@ -473,8 +516,8 @@ def _execute_pipeline(req: PipelineRequest) -> PipelineResponse:
             logger.error(f"[PIPELINE] ✗ PR failed: {e}")
             steps.append(StepResult(step="pr_creation", status="failed", detail=str(e)))
 
-        # ─── STEP 7: Jira tickets ───────────────────────
-        logger.info("[PIPELINE] Step 7: Creating Jira tickets...")
+        # ─── STEP 6: Jira tickets ───────────────────────
+        logger.info("[PIPELINE] Step 6: Creating Jira tickets...")
         jira_tickets = create_jira_tickets(jira, issue_results, all_issues, pr_url or "")
         if jira_tickets:
             steps.append(StepResult(step="jira_tickets", status="ok", detail=f"{len(jira_tickets)} ticket(s)"))
@@ -484,13 +527,12 @@ def _execute_pipeline(req: PipelineRequest) -> PipelineResponse:
         # ─── DONE ────────────────────────────────────────
         final_status = "success" if pr_url else "partial"
         logger.info("[PIPELINE] ════════════════════════════════════════")
-        logger.info(f"[PIPELINE] Done! {fixed_count} fixed ({verified_count} verified), {len(filtered_issues)} filtered, {failed_count} failed")
+        logger.info(f"[PIPELINE] Done! {fixed_count} fixed ({verified_count} verified), {failed_count} failed")
         logger.info("[PIPELINE] ════════════════════════════════════════")
 
         return PipelineResponse(
             status=final_status,
             issues_total=len(all_issues),
-            issues_filtered=len(filtered_issues),
             issues_fixed=fixed_count,
             issues_failed=failed_count,
             issue_results=issue_results,

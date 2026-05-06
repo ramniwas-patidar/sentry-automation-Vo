@@ -22,14 +22,14 @@ def build_pr_content(
     """Build PR title and description. Returns (title, body)."""
     fixed = [r for r in issue_results if r.status == "fixed"]
     failed = [r for r in issue_results if r.status == "failed"]
-    filtered = [r for r in issue_results if r.status == "filtered"]
 
-    pr_title = f"fix: auto-fix {len(fixed)} Sentry issue(s)"
+    sentry_ids = ",".join(r.issue_id for r in fixed)
+    suffix = f" [sentry: {sentry_ids}]" if sentry_ids else ""
+    pr_title = f"fix: auto-fix {len(fixed)} Sentry issue(s){suffix}"
 
     body = [
         "## Summary",
         f"Automated fixes for **{len(fixed)}** Sentry issues.",
-        f"- {len(filtered)} issues filtered as non-relevant (resolved in Sentry)",
         f"- {len(failed)} issues could not be fixed\n",
         "## Issues Fixed",
     ]
@@ -84,11 +84,6 @@ def build_pr_content(
                     body.append(f"\n**Post-fix output (last 500 chars):**\n```\n{tr.behavioral_post_fix_output}\n```\n")
                 body.append("</details>")
 
-    if filtered:
-        body.append("\n## Filtered Issues (resolved in Sentry)")
-        for r in filtered:
-            body.append(f"- **#{r.issue_id}**: {r.title} — {r.error}")
-
     if failed:
         body.append("\n## Issues Not Fixed")
         for r in failed:
@@ -114,11 +109,14 @@ def commit_push_and_create_pr(
 
     # Create PR
     pr_title, pr_body = build_pr_content(issue_results, all_issues)
+    fixed_ids = [r.issue_id for r in issue_results if r.status == "fixed"]
+    extra_labels = [f"sentry-issue-{i}" for i in fixed_ids]
     logger.info(f"[PR_CREATOR] Creating PR: {pr_title}")
     pr_url = github.create_pull_request(
         branch_name=branch_name,
         pr_title=pr_title,
         pr_description=pr_body,
+        extra_labels=extra_labels,
     )
     logger.info(f"[PR_CREATOR] ✓ PR created: {pr_url}")
     return pr_url

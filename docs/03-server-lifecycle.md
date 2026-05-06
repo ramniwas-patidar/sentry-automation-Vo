@@ -159,7 +159,7 @@ Meanwhile in the background thread, you'll see lots of activity:
 | What | Where you see it |
 |---|---|
 | HTTPS requests to Sentry | `[SENTRY]` log lines, network traffic |
-| HTTPS requests to OpenAI | `[LLM]` log lines, possibly slow (OpenAI can take 5–30s per call) |
+| HTTPS requests to OpenAI (patch + test generation) | `[LLM]` log lines, possibly slow (OpenAI can take 5–30s per call) |
 | `git fetch`, `git checkout`, `git commit`, `git push` | `[GIT]` log lines, plus the local repo on disk changes |
 | `npm test` (if `test_command` is set) | `[GIT]` log line plus the test runner's output appended |
 | HTTPS requests to GitHub (PR creation) | `[GITHUB]` log line |
@@ -222,12 +222,11 @@ Sentry servers          your machine                          OpenAI / GitHub / 
      │                       │            _execute_pipeline()
      │                       │                     │
      │                       │   Step 1 — fetch  ──┼──────► Sentry API
-     │                       │   Step 2 — filter ──┼──────► OpenAI
-     │                       │   Step 3 — branch ──┘
-     │                       │   Step 4 — TDD fix loop ───► OpenAI (×N)
-     │                       │   Step 5 — run tests
-     │                       │   Step 6 — commit/push/PR ─► GitHub
-     │                       │   Step 7 — create tickets ─► Jira
+     │                       │   Step 2 — branch ──┘
+     │                       │   Step 3 — TDD fix loop ───► OpenAI (×N)
+     │                       │   Step 4 — run tests
+     │                       │   Step 5 — commit/push/PR ─► GitHub
+     │                       │   Step 6 — create tickets ─► Jira
      │                       │   ↓
      │                       │  thread exits, lock released
      │                       │  server returns to idle

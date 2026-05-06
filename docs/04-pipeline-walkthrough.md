@@ -58,32 +58,11 @@ After this step you have a `list[SentryIssue]` in memory, each with `id`, `title
 
 > **Test-mode flag:** `TEST_MODE_FETCH_ONE = True` in `issue_fetcher.py` currently caps this to a single issue. Flip to `False` for full pagination.
 
----
-
-## Stage 3 — Step 2: LLM-based filtering
-
-File: `pipeline/issue_filter.py`.
-
-Sentry reports tons of noise: errors from browser extensions, bot traffic, transient network blips, hydration warnings from Next.js, etc. We do **not** want the automation to open PRs for those.
-
-So we ask GPT to triage:
-
-```
-For each of these N issues, classify it as relevant or not.
-Categories: application_bug, third_party, hydration, infrastructure,
-            browser_extension, bot_traffic, stale, other.
-Return JSON: [{ id, relevant: bool, category, reason }, ...]
-```
-
-Issues categorised as anything but `application_bug` are dropped. Filtered-out issues are also **resolved in Sentry** (a PATCH call to `/issues/{id}/`) so they don't keep hammering us.
-
-Output: `(relevant_issues, filtered_issues, filter_details)`.
-
-> **Test-mode flag:** `DISABLE_FILTER = True` skips this step entirely. Useful for development.
+> **No filtering step.** Earlier versions of the project ran an LLM triage step here to drop "noise" issues (browser extensions, bot traffic, etc.). That step has been removed — every fetched issue now flows straight into the fix loop. If you need to suppress an issue, mute or resolve it in Sentry directly.
 
 ---
 
-## Stage 4 — Step 3: Create the git branch
+## Stage 3 — Step 2: Create the git branch
 
 ```python
 branch_name = github.prepare_branch(f"batch-{N}issues")
@@ -104,9 +83,9 @@ After this step the local repo is sitting on a fresh branch off the latest `main
 
 ---
 
-## Stage 5 — Step 4: The TDD fix loop (the heart of the project)
+## Stage 4 — Step 3: The TDD fix loop (the heart of the project)
 
-File: `pipeline/issue_processor.py`. For each relevant issue, we loop up to `max_retries` times. Inside one attempt:
+File: `pipeline/issue_processor.py`. For each issue, we loop up to `max_retries` times. Inside one attempt:
 
 ### 5.1 Generate a patch
 
@@ -163,11 +142,10 @@ For each issue we get one of:
 - `status="fixed"` + `verified=True` — best case.
 - `status="fixed"` + `verified=False` — patch applied, behavioral check inconclusive. Still goes into the PR.
 - `status="failed"` — gave up after `max_retries`. Not included in the PR.
-- `status="filtered"` — never made it past Step 2.
 
 ---
 
-## Stage 6 — Step 5: Run the project's own test suite
+## Stage 5 — Step 4: Run the project's own test suite
 
 ```python
 tests_passed, test_output = github.run_tests()
@@ -179,7 +157,7 @@ If `test_command` is empty, this step is skipped.
 
 ---
 
-## Stage 7 — Step 6: Commit, push, open the PR
+## Stage 6 — Step 5: Commit, push, open the PR
 
 File: `pipeline/pr_creator.py`.
 
@@ -191,7 +169,7 @@ You get back a PR URL like `https://github.com/primathontech/wellversed/pull/812
 
 ---
 
-## Stage 8 — Step 7: File Jira tickets
+## Stage 7 — Step 6: File Jira tickets
 
 File: `pipeline/jira_creator.py`.
 
@@ -207,9 +185,9 @@ Skipped if Jira credentials are missing.
 
 ---
 
-## Stage 9 — Cleanup and response
+## Stage 8 — Cleanup and response
 
-The pipeline returns a `PipelineResponse` Pydantic model with everything that happened — total issues, filtered count, fixed count, PR URL, Jira ticket URLs, and per-step statuses. The thread function logs the result and exits. The lock is released. The temp clone directory is deleted.
+The pipeline returns a `PipelineResponse` Pydantic model with everything that happened — total issues, fixed count, PR URL, Jira ticket URLs, and per-step statuses. The thread function logs the result and exits. The lock is released. The temp clone directory is deleted.
 
 If anything failed unexpectedly along the way, the `try/except/finally` block in `_execute_pipeline()` ensures:
 - the temp branch is deleted (`github.cleanup(branch_name)`),
@@ -232,11 +210,9 @@ A trimmed example from `logs/sentry-automation.log`:
 [PIPELINE] Step 1: Fetching issues...
 [FETCHER] Fetched 1 issue (TEST_MODE_FETCH_ONE)
 [PIPELINE] ✓ Fetched 1 issues
-[PIPELINE] Step 2: Filtering issues via LLM...
-[FILTER] DISABLE_FILTER=True — passing through
-[PIPELINE] Step 3: Creating git branch...
+[PIPELINE] Step 2: Creating git branch...
 [GIT] Created branch fix/sentry-1issues-20260506-130801
-[PIPELINE] Step 4: TDD fixing 1 issues...
+[PIPELINE] Step 3: TDD fixing 1 issues...
 [PROCESSOR] Attempt 1/3 for #5429318420
 [LLM] Calling gpt-4o-mini for patch generation
 [PROCESSOR] ✓ Patch generated (confidence: 0.82)
@@ -244,15 +220,15 @@ A trimmed example from `logs/sentry-automation.log`:
 [PROCESSOR] Applying 1 file edits...
 [PROCESSOR] Post-fix tests: deterministic PASS, behavioral PASS ✓
 [PIPELINE]   Test: __tests__/UserCard.test.tsx | Pre-fix: FAIL | Post-fix: PASS | VERIFIED
-[PIPELINE] Step 5: Running tests...
+[PIPELINE] Step 4: Running tests...
 [GIT] $ npm test -- --watchAll=false
 [GIT] Tests passed
-[PIPELINE] Step 6: Creating PR...
+[PIPELINE] Step 5: Creating PR...
 [GIT] Pushed fix/sentry-1issues-20260506-130801 to origin
 [GITHUB] PR opened: https://github.com/primathontech/wellversed/pull/812
-[PIPELINE] Step 7: Creating Jira tickets...
+[PIPELINE] Step 6: Creating Jira tickets...
 [JIRA] Created CSPI-2014
-[PIPELINE] Done! 1 fixed (1 verified), 0 filtered, 0 failed
+[PIPELINE] Done! 1 fixed (1 verified), 0 failed
 [WEBHOOK] Background pipeline done: status=success, fixed=1
 ```
 

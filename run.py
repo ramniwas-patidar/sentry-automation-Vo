@@ -102,12 +102,12 @@ def main():
     # Print result
     print("\n" + "=" * 60)
     print(f"Status: {result.status}")
-    print(f"Issues: {result.issues_total} total, {result.issues_filtered} filtered, {result.issues_fixed} fixed, {result.issues_failed} failed")
+    print(f"Issues: {result.issues_total} total, {result.issues_fixed} fixed, {result.issues_failed} failed")
 
     if result.issue_results:
         print("\nIssues:")
         for r in result.issue_results:
-            icon = {"fixed": "✓", "filtered": "~", "failed": "✗"}.get(r.status, "?")
+            icon = {"fixed": "✓", "failed": "✗"}.get(r.status, "?")
             print(f"  {icon} [{r.status}] #{r.issue_id}: {r.title[:70]}")
             if r.files_changed:
                 print(f"      Files: {', '.join(r.files_changed)}")

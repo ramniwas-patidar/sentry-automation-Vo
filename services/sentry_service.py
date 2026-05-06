@@ -142,6 +142,41 @@ class SentryService:
         except requests.exceptions.RequestException as e:
             return {"error": str(e)}
 
+    def add_comment(self, issue_id: str, text: str) -> dict:
+        """Post a comment on a Sentry issue. Used as the dedup state store."""
+        try:
+            url = f"{self.base_url}/issues/{issue_id}/comments/"
+            logger.info(f"[SENTRY] add_comment → {url}")
+            response = requests.post(
+                url,
+                headers={**self._headers(), "Content-Type": "application/json"},
+                json={"text": text},
+                timeout=15,
+            )
+            logger.info(f"[SENTRY] add_comment ← status={response.status_code}")
+            if not response.ok:
+                logger.warning(f"[SENTRY] add_comment error: {response.text[:200]}")
+                return {"error": f"{response.status_code} {response.reason}"}
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            logger.warning(f"[SENTRY] add_comment exception: {e}")
+            return {"error": str(e)}
+
+    def get_comments(self, issue_id: str) -> list:
+        """Fetch all comments for a Sentry issue (newest first)."""
+        try:
+            url = f"{self.base_url}/issues/{issue_id}/comments/"
+            logger.info(f"[SENTRY] get_comments → {url}")
+            response = requests.get(url, headers=self._headers(), timeout=15)
+            logger.info(f"[SENTRY] get_comments ← status={response.status_code}")
+            if not response.ok:
+                logger.warning(f"[SENTRY] get_comments error: {response.text[:200]}")
+                return []
+            return response.json() or []
+        except requests.exceptions.RequestException as e:
+            logger.warning(f"[SENTRY] get_comments exception: {e}")
+            return []
+
     def update_issue_status(self, issue_id: str, status: str = "resolved") -> dict:
         try:
             url = f"{self.base_url}/issues/{issue_id}/"

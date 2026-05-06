@@ -28,7 +28,7 @@ class ProjectConfig(BaseModel):
     # Pipeline
     test_command: str = ""
     max_retries: int = 3
-    max_issues: int = 25  # max issues to process per pipeline run (after filtering)
+    max_issues: int = 25  # max issues to process per pipeline run
 
 
 class SentryIssue(BaseModel):
@@ -65,15 +65,6 @@ class StepResult(BaseModel):
     status: str
     detail: Optional[str] = None
     attempt: Optional[int] = None
-
-
-class FilteredIssue(BaseModel):
-    """Result of LLM filtering for a single issue."""
-    issue_id: str
-    title: str
-    is_relevant: bool
-    reason: str
-    category: Optional[str] = None
 
 
 class TestResult(BaseModel):
@@ -116,7 +107,7 @@ class IssueFixResult(BaseModel):
     """Result of fixing a single issue within the batch."""
     issue_id: str
     title: str
-    status: str  # "fixed", "failed", "skipped", "filtered"
+    status: str  # "fixed", "failed", "skipped"
     error: Optional[str] = None
     confidence: float = 0.0
     files_changed: list[str] = []
@@ -127,7 +118,6 @@ class IssueFixResult(BaseModel):
 class PipelineResponse(BaseModel):
     status: str  # "success", "partial", "failed", "dry_run"
     issues_total: int = 0
-    issues_filtered: int = 0
     issues_fixed: int = 0
     issues_failed: int = 0
     issue_results: list[IssueFixResult] = []

@@ -31,7 +31,7 @@ If a token leaks (committed by accident, posted in Slack), **rotate it immediate
 **Why we call it.**
 - *Pull issues* — we fetch the list of unresolved errors so the pipeline knows what to fix. Endpoint: `GET /api/0/projects/{org}/{project}/issues/`.
 - *Get full stacktrace* — the issue list endpoint gives summaries; we need a per-issue call to get the actual stacktrace frames. Endpoint: `GET /api/0/issues/{issue_id}/`.
-- *Mark as resolved* — when the LLM filter rejects an issue as "not a real bug", we resolve it on Sentry so it doesn't keep notifying us. Endpoint: `PUT /api/0/issues/{issue_id}/`.
+- *Mark as resolved* — available via `update_issue_status()`. Currently unused by the pipeline (no automatic resolutions); kept for ad-hoc / future use. Endpoint: `PUT /api/0/issues/{issue_id}/`.
 - *Receive webhooks* — Sentry can call our `POST /webhook/sentry` whenever a new issue or alert fires. We didn't write this; we configured it in the Sentry UI.
 
 **Token.** `SENTRY_TOKEN` in `.env`. Get one from Sentry → Settings → Auth Tokens.
@@ -45,7 +45,6 @@ If a token leaks (committed by accident, posted in Slack), **rotate it immediate
 **What it is.** OpenAI hosts large language models (GPT-4o, GPT-4o-mini, etc.) behind a paid API. You send a prompt, you get text back. You pay per token (≈ per word).
 
 **Why we call it.**
-- *Filter step* — classify which Sentry issues are real application bugs vs noise.
 - *Patch generation* — given an error + stacktrace + relevant source code, produce a JSON list of file edits that fix the bug.
 - *Behavioral test generation* — write a Jest+RTL test that exercises the broken user flow.
 - *Test repair* — if a generated test fails to compile, ask the LLM to fix the test itself.

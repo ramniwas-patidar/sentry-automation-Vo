@@ -13,14 +13,13 @@ Sentry Webhook
  FastAPI Server  ──► Look up project config (projects/*.json)
       │
       ▼
- Pipeline (7 steps)
+ Pipeline (6 steps)
   1. Fetch Issues      ← Sentry API
-  2. LLM Filter        ← GPT decides which issues are real app bugs
-  3. Create Git Branch ← git checkout -b fix/sentry-...
-  4. TDD Fix Loop      ← GPT generates fix + tests, verifies pre/post
-  5. Run Tests         ← project's test_command (if configured)
-  6. Commit + PR       ← GitHub API
-  7. Jira Tickets      ← Jira REST API
+  2. Create Git Branch ← git checkout -b fix/sentry-...
+  3. TDD Fix Loop      ← GPT generates fix + tests, verifies pre/post
+  4. Run Tests         ← project's test_command (if configured)
+  5. Commit + PR       ← GitHub API
+  6. Jira Tickets      ← Jira REST API
 ```
 
 ---
@@ -38,7 +37,6 @@ sentry-automation-Vo/
 │
 ├── pipeline/
 │   ├── issue_fetcher.py     # Fetches & deduplicates issues from Sentry
-│   ├── issue_filter.py      # LLM-based triage (relevant vs noise)
 │   ├── issue_processor.py   # Core fix loop: generate patch → test → apply
 │   ├── test_generator.py    # Builds deterministic + behavioral tests
 │   ├── pr_creator.py        # Commits, pushes, creates GitHub PR
@@ -194,18 +192,11 @@ Shows debounce state for all projects (last triggered, cooldown remaining).
 - Enriches each issue with full stacktrace via `get_issue_details()`
 - **TEST_MODE_FETCH_ONE = True** — currently hardcoded to fetch only 1 issue per run (flip to `False` for full pagination)
 
-### Step 2 — LLM Filter (`issue_filter.py`)
-- Sends issue summaries to GPT in batches of 20
-- GPT classifies each as `relevant` or not, with a category and reason
-- Categories: `application_bug`, `third_party`, `hydration`, `infrastructure`, `browser_extension`, `bot_traffic`, `stale`, `other`
-- Filtered-out issues are marked as resolved in Sentry
-- **DISABLE_FILTER = True** — currently hardcoded to skip filtering and treat all issues as relevant
-
-### Step 3 — Create Git Branch
+### Step 2 — Create Git Branch
 - Fetches latest from origin, checks out base branch, pulls
 - Creates a new branch: `fix/sentry-{N}issues-{timestamp}`
 
-### Step 4 — TDD Fix Loop (`issue_processor.py`)
+### Step 3 — TDD Fix Loop (`issue_processor.py`)
 For each issue, up to `max_retries` times:
 
 1. **Generate patch** — GPT receives the error title, stacktrace, relevant source files, and file tree. Returns a list of `file_edits` (filepath + original snippet + replacement).
@@ -218,15 +209,15 @@ For each issue, up to `max_retries` times:
 
 The fix is accepted even if tests are unverified. `verified = True` only when the behavioral test fails pre-fix and passes post-fix.
 
-### Step 5 — Run Tests
+### Step 4 — Run Tests
 Runs `project.test_command` in the repo directory. If it fails, the branch is cleaned up and the pipeline returns `failed`. Skipped if `test_command` is empty.
 
-### Step 6 — Commit + PR (`pr_creator.py`)
+### Step 5 — Commit + PR (`pr_creator.py`)
 - Commits all changes with a message listing every fixed issue
 - Pushes the branch to GitHub
 - Creates a PR via PyGithub with a detailed description including test verification tables
 
-### Step 7 — Jira Tickets (`jira_creator.py`)
+### Step 6 — Jira Tickets (`jira_creator.py`)
 - Creates one Jira ticket per fixed issue (skipped if Jira is not configured)
 - Ticket includes: error title, files changed, confidence score, test verification details, stacktrace, PR link
 
@@ -261,7 +252,6 @@ Two methods:
         ▼
    pipeline/
      issue_fetcher.py   → list[SentryIssue]
-     issue_filter.py    → (relevant, filtered, details)
      issue_processor.py → IssueFixResult (per issue)
        └── test_generator.py → TestResult (det + behavioral)
      pr_creator.py      → PR URL
@@ -283,7 +273,6 @@ Log prefixes by module:
 | `[PIPELINE]` | server/__init__.py orchestration |
 | `[WEBHOOK]` | webhook handler |
 | `[FETCHER]` | issue_fetcher.py |
-| `[FILTER]` | issue_filter.py |
 | `[PROCESSOR]` | issue_processor.py |
 | `[GIT]` | github_service.py git ops |
 | `[GITHUB]` | github_service.py API ops |
@@ -295,14 +284,11 @@ Log prefixes by module:
 
 ## Current Test Mode Flags
 
-Two flags are hardcoded in the source to limit scope during development:
-
 | Flag | File | Effect |
 |---|---|---|
 | `TEST_MODE_FETCH_ONE = True` | `pipeline/issue_fetcher.py` | Only fetches 1 issue per run |
-| `DISABLE_FILTER = True` | `pipeline/issue_filter.py` | Skips LLM filtering, all issues treated as relevant |
 
-Set both to `False` for full production behaviour.
+Set to `False` for full production behaviour.
 
 ---
 

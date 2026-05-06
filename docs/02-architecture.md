@@ -77,13 +77,12 @@ Each pipeline step is a separate file under `pipeline/`. They are pure functions
 | File | Step it implements |
 |---|---|
 | `issue_fetcher.py` | Step 1 — Pull issues from Sentry. |
-| `issue_filter.py` | Step 2 — Ask the LLM "is this a real bug?". |
-| `issue_processor.py` | Step 4 — The TDD fix loop (the brain of the project). Calls `test_generator.py` to build tests. |
+| `issue_processor.py` | Step 3 — The TDD fix loop (the brain of the project). Calls `test_generator.py` to build tests. |
 | `test_generator.py` | Builds two kinds of tests: a deterministic file-content check, and a Jest+RTL behavioral test. |
-| `pr_creator.py` | Step 6 — Commit, push, open PR. |
-| `jira_creator.py` | Step 7 — Create Jira tickets. |
+| `pr_creator.py` | Step 5 — Commit, push, open PR. |
+| `jira_creator.py` | Step 6 — Create Jira tickets. |
 
-(Steps 3 and 5 — git branch creation and test runs — live inside `services/github_service.py` because they're thin git operations.)
+(Steps 2 and 4 — git branch creation and test runs — live inside `services/github_service.py` because they're thin git operations.)
 
 ### Layer 4 — Services (one per external system)
 

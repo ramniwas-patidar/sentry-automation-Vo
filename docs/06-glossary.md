@@ -89,7 +89,7 @@ The official Python client library for OpenAI's API. Imported in `llm/claude.py`
 A find-and-replace pair (`original` → `replacement`) that the LLM produces to fix a bug. Multiple patches can be returned for one issue.
 
 ### Pipeline
-The 7-step process: fetch → filter → branch → fix → test → PR → Jira. Defined in `server/__init__.py` (`_execute_pipeline`).
+The 6-step process: fetch → branch → fix → test → PR → Jira. Defined in `server/__init__.py` (`_execute_pipeline`).
 
 ### Port
 A number identifying a specific listener on a machine. This server listens on port `8000`. Two programs can't bind the same port.

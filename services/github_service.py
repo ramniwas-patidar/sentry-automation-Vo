@@ -153,7 +153,7 @@ class GitHubService:
 
     # ── GitHub API operations ─────────────────────────────
 
-    def create_pull_request(self, branch_name: str, pr_title: str, pr_description: str) -> str:
+    def create_pull_request(self, branch_name: str, pr_title: str, pr_description: str, extra_labels: list = None) -> str:
         logger.info(f"[GITHUB] ── Creating Pull Request ──")
         logger.info(f"[GITHUB] Repo: {self.github_repo}")
         logger.info(f"[GITHUB] Branch: {branch_name} → {self.base_branch}")
@@ -168,7 +168,10 @@ class GitHubService:
             )
             logger.info(f"[GITHUB] PR created: {pr.html_url}")
             try:
-                pr.add_to_labels("auto-fix", "sentry")
+                labels = ["auto-fix", "sentry"]
+                if extra_labels:
+                    labels.extend(extra_labels)
+                pr.add_to_labels(*labels)
             except GithubException:
                 pass
             return pr.html_url
