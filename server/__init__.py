@@ -456,6 +456,7 @@ def _execute_pipeline_core(req: PipelineRequest) -> PipelineResponse:
             fix_result = process_issue(
                 issue, github, dry_run=req.dry_run,
                 max_retries=req.project.max_retries,
+                context_file=req.project.context_file,
             )
             issue_results.append(fix_result)
 

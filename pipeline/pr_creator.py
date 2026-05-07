@@ -23,9 +23,17 @@ def build_pr_content(
     fixed = [r for r in issue_results if r.status == "fixed"]
     failed = [r for r in issue_results if r.status == "failed"]
 
+    # Classification scope tag in PR title (e.g. "fix(third-party):", "fix(flow):").
+    # If all fixed issues agree on a classification, use it; mixed batches stay generic.
+    classifications = {r.classification for r in fixed if r.classification}
+    scope = ""
+    if len(classifications) == 1:
+        scope_map = {"third_party": "third-party", "flow": "flow", "misc": "misc"}
+        scope = f"({scope_map.get(next(iter(classifications)), '')})"
+
     sentry_ids = ",".join(r.issue_id for r in fixed)
     suffix = f" [sentry: {sentry_ids}]" if sentry_ids else ""
-    pr_title = f"fix: auto-fix {len(fixed)} Sentry issue(s){suffix}"
+    pr_title = f"fix{scope}: auto-fix {len(fixed)} Sentry issue(s){suffix}"
 
     body = [
         "## Summary",
@@ -109,8 +117,10 @@ def commit_push_and_create_pr(
 
     # Create PR
     pr_title, pr_body = build_pr_content(issue_results, all_issues)
-    fixed_ids = [r.issue_id for r in issue_results if r.status == "fixed"]
-    extra_labels = [f"sentry-issue-{i}" for i in fixed_ids]
+    fixed_results = [r for r in issue_results if r.status == "fixed"]
+    extra_labels = [f"sentry-issue-{r.issue_id}" for r in fixed_results]
+    classifications = {r.classification for r in fixed_results if r.classification}
+    extra_labels.extend(f"class-{c}" for c in classifications)
     logger.info(f"[PR_CREATOR] Creating PR: {pr_title}")
     pr_url = github.create_pull_request(
         branch_name=branch_name,

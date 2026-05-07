@@ -6,6 +6,7 @@ from typing import Optional
 from models.schemas import IssueFixResult, PatchResult, SentryIssue
 from services.github_service import GitHubService
 from services.llm_service import get_llm
+from pipeline.prompt_builder import build_patch_system_prompt
 from pipeline.test_generator import (
     BehavioralRun,
     build_behavioral_test,
@@ -19,45 +20,13 @@ from pipeline.test_generator import (
 
 logger = logging.getLogger(__name__)
 
-PATCH_SYSTEM_PROMPT = """You are a senior software engineer. Your job is to fix bugs based on Sentry error reports.
-
-You will receive:
-- The error title and message
-- The stacktrace showing where the error occurred
-- The relevant source code file(s) from the repository
-- The project file structure
-
-You must return a JSON object with these exact keys:
-{
-  "file_edits": [
-    {
-      "filepath": "relative/path/to/file.tsx",
-      "original": "the exact original code snippet to find",
-      "replacement": "the replacement code"
-    }
-  ],
-  "commit_message": "A conventional commit message (e.g., fix: handle null check in UserService)",
-  "pr_title": "Short PR title under 70 chars",
-  "pr_description": "Markdown PR body explaining root cause and fix",
-  "confidence": 0.0 to 1.0
-}
-
-Rules:
-- file_edits must contain at least one edit
-- "filepath" must be a real file path relative to the repo root
-- "original" must be an EXACT substring of the current file content (copy it precisely, including whitespace)
-- "replacement" is what replaces the original snippet
-- Only change what's necessary to fix the bug
-- Do not add unrelated changes
-- If you're unsure, set confidence low
-- Return ONLY valid JSON, no markdown code fences"""
-
 
 def process_issue(
     issue: SentryIssue,
     github: GitHubService,
     dry_run: bool = False,
     max_retries: int = 3,
+    context_file: Optional[str] = None,
 ) -> IssueFixResult:
     """Fix issue, then verify with deterministic test built from the fix itself."""
     retry_context = []
@@ -68,8 +37,8 @@ def process_issue(
 
         # ── Step 1: Generate fix ──────────────────────────
         try:
-            patch_result = _generate_patch(issue, github, retry_context)
-            logger.info(f"[PROCESSOR] ✓ Patch generated (confidence: {patch_result.confidence})")
+            patch_result = _generate_patch(issue, github, retry_context, context_file=context_file)
+            logger.info(f"[PROCESSOR] ✓ Patch generated (classification={patch_result.classification or 'unspecified'}, confidence: {patch_result.confidence})")
         except Exception as e:
             logger.error(f"[PROCESSOR] ✗ Patch generation failed: {e}")
             retry_context.append({"diff": "", "error": f"Generation failed: {e}"})
@@ -85,6 +54,7 @@ def process_issue(
             return IssueFixResult(
                 issue_id=issue.id, title=issue.title,
                 status="fixed", confidence=patch_result.confidence,
+                classification=patch_result.classification,
                 files_changed=files,
             )
 
@@ -197,6 +167,7 @@ def process_issue(
         return IssueFixResult(
             issue_id=issue.id, title=issue.title,
             status="fixed", confidence=patch_result.confidence,
+            classification=patch_result.classification,
             files_changed=files, test_result=test_result,
         )
 
@@ -211,6 +182,7 @@ def _generate_patch(
     issue: SentryIssue,
     github: GitHubService,
     retry_context: list[dict],
+    context_file: Optional[str] = None,
 ) -> PatchResult:
     llm = get_llm()
 
@@ -218,14 +190,21 @@ def _generate_patch(
     file_tree = github.get_file_tree()
     user_message = _build_user_message(issue, source_context, file_tree, retry_context)
 
+    system_prompt = build_patch_system_prompt(context_file=context_file)
+
     data = llm.chat_json(
-        system_prompt=PATCH_SYSTEM_PROMPT,
+        system_prompt=system_prompt,
         user_message=user_message,
     )
 
     file_edits = data.get("file_edits", [])
     if not file_edits:
         raise ValueError("LLM returned no file edits")
+
+    classification = data.get("classification")
+    if classification not in (None, "third_party", "flow", "misc"):
+        logger.warning(f"[PROCESSOR] Unknown classification value '{classification}' — coercing to None")
+        classification = None
 
     logger.info(f"[PROCESSOR] File edits count: {len(file_edits)}")
     for i, edit in enumerate(file_edits):
@@ -239,6 +218,7 @@ def _generate_patch(
         pr_title=data.get("pr_title", f"fix: {issue.title[:60]}"),
         pr_description=data.get("pr_description", f"Fixes Sentry issue {issue.id}"),
         confidence=float(data.get("confidence", 0.5)),
+        classification=classification,
     )
 
 

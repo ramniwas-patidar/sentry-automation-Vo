@@ -38,6 +38,7 @@ sentry-automation-Vo/
 ├── pipeline/
 │   ├── issue_fetcher.py     # Fetches & deduplicates issues from Sentry
 │   ├── issue_processor.py   # Core fix loop: generate patch → test → apply
+│   ├── prompt_builder.py    # Builds LLM system prompt: resolver MD + project context + JSON schema
 │   ├── test_generator.py    # Builds deterministic + behavioral tests
 │   ├── pr_creator.py        # Commits, pushes, creates GitHub PR
 │   └── jira_creator.py      # Creates Jira tickets for fixed issues
@@ -53,6 +54,9 @@ sentry-automation-Vo/
 │
 ├── models/
 │   └── schemas.py           # All Pydantic models (request/response shapes)
+│
+├── prompts/
+│   └── sentry-error-resolver.md  # Shared LLM policy: classification + minimalistic-change discipline
 │
 ├── projects/
 │   ├── wellversed.json      # Config for the "wellversed-prod" Sentry project
@@ -77,6 +81,7 @@ Every project is described by a JSON file in `projects/`. The pipeline is entire
 | `github_repo` | ✅ | `owner/repo` on GitHub |
 | `base_branch` | ✅ | Branch to create PRs against (default: `main`) |
 | `repo_path` | optional | Local path to repo. If omitted, repo is auto-cloned |
+| `context_file` | optional | Path to a markdown file with codebase notes; appended to the LLM system prompt for this project |
 | `jira_project_key` | optional | Jira project key (e.g. `CSPI`) |
 | `test_command` | optional | Shell command to run tests (e.g. `npm test`) |
 | `max_retries` | optional | LLM fix attempts per issue (default: 3) |
@@ -230,6 +235,22 @@ Despite the class name `ClaudeLLM`, this uses the **OpenAI Python SDK** pointed 
 Two methods:
 - `chat(system_prompt, user_message, ...)` → raw string response
 - `chat_json(system_prompt, user_message, ...)` → parsed dict (uses `response_format: json_object`)
+
+### System prompt assembly (`pipeline/prompt_builder.py`)
+
+The system prompt for patch generation is built from three layers:
+
+1. **`prompts/sentry-error-resolver.md`** — shared LLM policy: classification rules (`third_party` / `flow` / `misc`), the "minimalistic file changes" constraint, and scoped-suppression guidance. Same for every project.
+2. **Per-project context** (optional) — if a project's `context_file` field points to a markdown file, its contents are appended. Use this to teach the LLM your stack, conventions, common pitfalls, and corrections from past wrong fixes.
+3. **JSON output schema** — overrides the policy's markdown output format because the pipeline parses structured data. Adds the `classification` field to the LLM response.
+
+Each LLM call asks the model to return its triage classification alongside the file edits. The classification surfaces in:
+- Logs (`[PROCESSOR] ✓ Patch generated (classification=flow, ...)`)
+- PR title scope (`fix(flow):` / `fix(third-party):` / `fix(misc):`)
+- PR labels (`class-flow`, `class-third_party`, `class-misc`)
+- The Jira ticket (via `IssueFixResult.classification`)
+
+To improve fix quality on a project: edit `<project>-context.md`, set `context_file` in `projects/<project>.json`, and iterate. Every time the LLM gets something wrong, write the correction into the markdown.
 
 ---
 

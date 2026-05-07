@@ -29,6 +29,7 @@ class ProjectConfig(BaseModel):
     test_command: str = ""
     max_retries: int = 3
     max_issues: int = 25  # max issues to process per pipeline run
+    context_file: Optional[str] = None  # path to a markdown file with codebase notes; appended to LLM system prompt
 
 
 class SentryIssue(BaseModel):
@@ -51,6 +52,7 @@ class PatchResult(BaseModel):
     pr_title: str
     pr_description: str
     confidence: float = 0.0
+    classification: Optional[str] = None  # "third_party" | "flow" | "misc"
 
 
 class PipelineRequest(BaseModel):
@@ -110,6 +112,7 @@ class IssueFixResult(BaseModel):
     status: str  # "fixed", "failed", "skipped"
     error: Optional[str] = None
     confidence: float = 0.0
+    classification: Optional[str] = None  # "third_party" | "flow" | "misc"
     files_changed: list[str] = []
     jira_ticket: Optional[str] = None
     test_result: Optional[TestResult] = None
